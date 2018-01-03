@@ -26,38 +26,31 @@ class ZkMetadataTest extends FunSuite {
     assert(ZkMetadata.fromAddrMetadata(addrMetadata) == Some(ZkMetadata(None)))
   }
 
-  test("AddressOrdering") {
+  test("shardHashOrdering") {
     val size = 10
-    val addresses: Seq[Address] = (size until 0 by -1).map { i =>
+    val addresses: Seq[Address] = (0 until size).map { i =>
       val metadata = ZkMetadata.toAddrMetadata(ZkMetadata(Some(i)))
       Address.Inet(InetSocketAddress.createUnresolved("test", 0), metadata)
     }
+    def sort(addrs: Seq[Address]): Seq[Address] = addrs.sorted(ZkMetadata.shardHashOrdering)
+    // deterministic
+    assert(sort(addresses) == sort(addresses))
+    assert(sort(addresses) != addresses)
 
-    val sorted = addresses.sorted(ZkMetadata.AddressOrdering)
-    sorted.indices.foreach { i => assert(addresses(i) == sorted(size - i - 1)) }
-
-    val noMetaData: Seq[Address] = addresses.collect {
-      case a@Address.Inet(_, _) => a.copy(metadata = Addr.Metadata.empty)
-    }
-    val sortedNoMetaData = noMetaData.sorted(ZkMetadata.AddressOrdering)
-    sortedNoMetaData.indices.foreach { i => assert(noMetaData(i) == sortedNoMetaData(i)) }
-  }
-
-  test("Heterogenous AddressOrdering") {
     def newAddress(shardId: Option[Int]): Address = {
       val metadata = ZkMetadata.toAddrMetadata(ZkMetadata(shardId))
       Address.Inet(InetSocketAddress.createUnresolved("test", 0), metadata)
     }
 
-    val addresses: Seq[Address] = Seq(
+    val heterogenous: Seq[Address] = Seq(
       newAddress(None),
       newAddress(Some(3)),
       newAddress(Some(2)),
       newAddress(Some(1)),
       Address.Inet(InetSocketAddress.createUnresolved("test", 0), Addr.Metadata.empty),
-      Address.Failed(new Exception))
+      Address.Failed(new Exception)
+    )
 
-    val sorted = addresses.zipWithIndex.sortBy(_._1)(ZkMetadata.AddressOrdering)
-    assert(sorted.map(_._2) == Seq(3, 2, 1, 0, 4, 5))
+    assert(heterogenous.sorted(ZkMetadata.shardHashOrdering) != heterogenous)
   }
 }

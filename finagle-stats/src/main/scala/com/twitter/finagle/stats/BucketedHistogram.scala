@@ -1,9 +1,12 @@
 package com.twitter.finagle.stats
 
-import com.twitter.common.stats
 import java.util
 
 private[twitter] object BucketedHistogram {
+
+  private[stats] val DefaultQuantiles = IndexedSeq(
+    0.5, 0.9, 0.95, 0.99, 0.999, 0.9999
+  )
 
   /**
    * Given an error, compute all the bucket values from 1 until we run out of positive
@@ -62,7 +65,6 @@ private[twitter] object BucketedHistogram {
 
 }
 
-
 /**
  * Allows for computing approximate percentiles from a stream of
  * data points.
@@ -76,7 +78,7 @@ private[twitter] object BucketedHistogram {
  * This is ''not'' internally thread-safe and thread-safety must be applied
  * externally. Typically, this is done via [[MetricsBucketedHistogram]].
  *
- * ''Note:'' while the interface for [[BucketedHistogram.add(Long)]] takes a `Long`,
+ * ''Note:'' while the interface for [[add(Long)]] takes a `Long`,
  * internally the maximum value we will observe is `Int.MaxValue`. This is subject
  * to change and should be considered the minimum upper bound. Also, the smallest
  * value we will record is `0`.
@@ -101,10 +103,7 @@ private[twitter] object BucketedHistogram {
  *
  * @see [[BucketedHistogram.apply()]] for creation.
  */
-private[stats] class BucketedHistogram(
-    limits: Array[Int])
-  extends stats.Histogram
-{
+private[stats] class BucketedHistogram(limits: Array[Int]) {
   BucketedHistogram.assertLimits(limits)
 
   private[this] def countsLength: Int = limits.length + 1
@@ -138,7 +137,7 @@ private[stats] class BucketedHistogram(
     num += 1
   }
 
-  override def clear(): Unit = {
+  def clear(): Unit = {
     var i = 0
     while (i < countsLength) {
       counts(i) = 0
@@ -225,10 +224,10 @@ private[stats] class BucketedHistogram(
     }
   }
 
-  override def getQuantile(quantile: Double): Long =
+  def getQuantile(quantile: Double): Long =
     percentile(quantile)
 
-  override def getQuantiles(quantiles: Array[Double]): Array[Long] = {
+  def getQuantiles(quantiles: IndexedSeq[Double]): Array[Long] = {
     val ps = new Array[Long](quantiles.length)
     var i = 0
     while (i < ps.length) {
@@ -259,12 +258,12 @@ private[stats] class BucketedHistogram(
    * @return 0.0 if no values have been [[add added]].
    */
   def average: Double =
-    if (num == 0) 0.0 else total/num.toDouble
+    if (num == 0) 0.0 else total / num.toDouble
 
   /**
    * Returns a seq containing nonzero values of the histogram.
    * The sequence contains instances of BucketAndCount which are
-   * the bucket's upper and lower limits and a count of the number 
+   * the bucket's upper and lower limits and a count of the number
    * of times a value in range of the limits was added.
    */
   def bucketAndCounts: Seq[BucketAndCount] = {
@@ -276,7 +275,7 @@ private[stats] class BucketedHistogram(
         val upperLimit = if (idx != limits.length) {
           limits(idx)
         } else Int.MaxValue
-        val lowerLimit = if (idx != 0){
+        val lowerLimit = if (idx != 0) {
           limits(idx - 1)
         } else 0
         BucketAndCount(lowerLimit, upperLimit, count)

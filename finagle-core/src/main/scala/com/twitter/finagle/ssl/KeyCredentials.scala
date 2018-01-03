@@ -31,15 +31,11 @@ object KeyCredentials {
    * @param keyFile A file containing a PKCS #8 private key in PEM format.
    * It should not require a password.
    */
-  case class CertAndKey(
-      certificateFile: File,
-      keyFile: File)
-    extends KeyCredentials
+  case class CertAndKey(certificateFile: File, keyFile: File) extends KeyCredentials
 
   /**
    * Indicates that this certificate, key, and certificate chain
-   * should be used by the engine factory. This option should
-   * only be used with legacy engine factories.
+   * should be used by the engine factory.
    *
    * @param certificateFile A file containing an X.509 certificate in
    * PEM format.
@@ -50,9 +46,6 @@ object KeyCredentials {
    * @param caCertificateFile A file containing a chain of X.509 certificates
    * in PEM format.
    */
-  case class CertKeyAndChain(
-      certificateFile: File,
-      keyFile: File,
-      caCertificateFile: File)
-    extends KeyCredentials
+  case class CertKeyAndChain(certificateFile: File, keyFile: File, caCertificateFile: File)
+      extends KeyCredentials
 }

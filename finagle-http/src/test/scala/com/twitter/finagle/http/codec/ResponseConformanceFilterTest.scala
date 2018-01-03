@@ -7,11 +7,8 @@ import com.twitter.finagle.http.Status._
 import com.twitter.io.Buf
 import com.twitter.io.Reader.ReaderDiscarded
 import com.twitter.util.{Await, Future}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class ResponseConformanceFilterTest extends FunSuite {
 
   test("add content-length header") {
@@ -23,13 +20,72 @@ class ResponseConformanceFilterTest extends FunSuite {
     assert(resp2.contentLength == Some(body.length.toLong))
   }
 
-  test("strip content-length header from chunked response") {
+  test(
+    "doesn't strip content-length header from chunked response " +
+      "if 'transfer-encoding: chunked' is not set"
+  ) {
     val resp = Response()
     resp.setChunked(true)
     resp.contentLength = 45
 
     val resp2 = fetchResponse(resp)
+    assert(resp2.contentLength == Some(45))
+    assert(!resp2.headerMap.contains(Fields.TransferEncoding))
+  }
+
+  test(
+    "strip content-length header from chunked response " +
+      "if 'transfer-encoding: chunked' is set"
+  ) {
+    val resp = Response()
+    resp.setChunked(true)
+    resp.headerMap.set(Fields.TransferEncoding, "chunked")
+    resp.contentLength = 45
+
+    val resp2 = fetchResponse(resp)
     assert(resp2.contentLength == None)
+    assert(resp2.headerMap.contains(Fields.TransferEncoding))
+  }
+
+  test("transfer-encoding not added to HTTP/1.0 responses") {
+    val resp = Response()
+    resp.setChunked(true)
+    resp.version = Version.Http10
+    val resp2 = fetchResponse(resp)
+    assert(!resp2.headerMap.contains(Fields.TransferEncoding))
+  }
+
+  test("transfer-encoding is stripped from HTTP/1.0 responses") {
+    val resp = Response()
+    resp.setChunked(true)
+    resp.version = Version.Http10
+    resp.headerMap.add(Fields.TransferEncoding, "chunked")
+    val resp2 = fetchResponse(resp)
+    assert(!resp2.headerMap.contains(Fields.TransferEncoding))
+  }
+
+  test("Doesn't clobber non-chunked values for Transfer-Encoding headers") {
+    val resp = Response()
+    resp.setChunked(true)
+    resp.headerMap.add(Fields.TransferEncoding, "gzip")
+    val resp2 = fetchResponse(resp)
+    val teHeaders = resp2.headerMap.getAll(Fields.TransferEncoding).toSet
+
+    assert(teHeaders == Set("gzip", "chunked"))
+  }
+
+  test(
+    "Doesn't remove non-chunked values for Transfer-Encoding headers when " +
+      "Content-Lenght header is present"
+  ) {
+    val resp = Response()
+    resp.setChunked(true)
+    resp.headerMap.add(Fields.TransferEncoding, "gzip")
+    resp.contentLength = 45
+    val resp2 = fetchResponse(resp)
+
+    assert(resp2.headerMap.getAll(Fields.TransferEncoding) == Seq("gzip"))
+    assert(resp.contentLength == Some(45))
   }
 
   test("response to HEAD request with content-length") {
@@ -79,8 +135,9 @@ class ResponseConformanceFilterTest extends FunSuite {
   }
 
   List(Continue, SwitchingProtocols, Processing, NoContent, NotModified).foreach { status =>
-    test(s"response with status code ${status.code} must not have a message body nor " +
-      "Content-Length header field"
+    test(
+      s"response with status code ${status.code} must not have a message body nor " +
+        "Content-Length header field"
     ) {
       val res = Response(Version.Http11, status)
       val response = fetchResponse(res)
@@ -93,8 +150,9 @@ class ResponseConformanceFilterTest extends FunSuite {
   }
 
   List(Continue, SwitchingProtocols, Processing, NoContent, NotModified).foreach { status =>
-    test(s"response with status code ${status.code} must not have a message body nor " +
-      "Content-Length header field when non-empty body is returned"
+    test(
+      s"response with status code ${status.code} must not have a message body nor " +
+        "Content-Length header field when non-empty body is returned"
     ) {
       val body = Buf.Utf8("some data")
       val res = Response(Version.Http11, status)
@@ -110,8 +168,9 @@ class ResponseConformanceFilterTest extends FunSuite {
   }
 
   List(Continue, SwitchingProtocols, Processing, NoContent).foreach { status =>
-    test(s"response with status code ${status.code} must not have a message body nor " +
-      "Content-Length header field when non-empty body with explicit Content-Length is returned"
+    test(
+      s"response with status code ${status.code} must not have a message body nor " +
+        "Content-Length header field when non-empty body with explicit Content-Length is returned"
     ) {
       val body = Buf.Utf8("some data")
       val res = Response(Version.Http11, status)
@@ -127,8 +186,10 @@ class ResponseConformanceFilterTest extends FunSuite {
     }
   }
 
-  test("response with status code 304 must not have a message body *BUT* Content-Length " +
-    "header field when non-empty body with explicit Content-Length is returned") {
+  test(
+    "response with status code 304 must not have a message body *BUT* Content-Length " +
+      "header field when non-empty body with explicit Content-Length is returned"
+  ) {
     val body = Buf.Utf8("some data")
     val res = Response(Version.Http11, Status.NotModified)
     res.content = body
@@ -154,7 +215,9 @@ class ResponseConformanceFilterTest extends FunSuite {
   }
 
   def runFilter(req: Request, res: Response): Response = {
-    val service = ResponseConformanceFilter andThen Service.mk { _: Request => Future.value(res) }
+    val service = ResponseConformanceFilter andThen Service.mk { _: Request =>
+      Future.value(res)
+    }
     Await.result(service(req), 5.seconds)
   }
 

@@ -1,5 +1,7 @@
 package com.twitter.finagle
 
+import scala.util.hashing.MurmurHash3
+
 /**
  * This package implements client side load balancing algorithms.
  *
@@ -13,10 +15,34 @@ package com.twitter.finagle
  */
 package object loadbalancer {
 
+  /**
+   * A reference to the current address [[Ordering]]. By default, it orders
+   * [[Address Addresses]] based on a deterministic hash of their IP.
+   *
+   * @note In the case of unresolved addresses, certain sorting implementations
+   * will require consistent results across comparisons so it may fail
+   * during the sort.
+   */
   @volatile private[this] var addressOrdering: Ordering[Address] =
     new Ordering[Address] {
-      def compare(a0: Address, a1: Address): Int = Address.OctetOrdering.compare(a0, a1)
-      override def toString: String = "Address.OctetOrdering"
+      def compare(a0: Address, a1: Address): Int = (a0, a1) match {
+        case (Address.Inet(inet0, _), Address.Inet(inet1, _)) =>
+          if (inet0.isUnresolved || inet1.isUnresolved) 0
+          else {
+            val ipHash0 = MurmurHash3.bytesHash(inet0.getAddress.getAddress)
+            val ipHash1 = MurmurHash3.bytesHash(inet1.getAddress.getAddress)
+            val ipCompare = Integer.compare(ipHash0, ipHash1)
+            if (ipCompare != 0) ipCompare
+            else {
+              Integer.compare(inet0.getPort, inet1.getPort)
+            }
+          }
+        case (_: Address.Inet, _) => -1
+        case (_, _: Address.Inet) => 1
+        case _ => 0
+      }
+
+      override def toString: String = "DefaultHashOrdering"
     }
 
   /**

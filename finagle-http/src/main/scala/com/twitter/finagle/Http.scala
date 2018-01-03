@@ -7,13 +7,22 @@ import com.twitter.finagle.filter.PayloadSizeFilter
 import com.twitter.finagle.http._
 import com.twitter.finagle.http.codec.{HttpClientDispatcher, HttpServerDispatcher}
 import com.twitter.finagle.http.exp.StreamTransport
-import com.twitter.finagle.http.filter.{ClientContextFilter, HttpNackFilter, ServerContextFilter}
+import com.twitter.finagle.http.filter.{
+  ClientContextFilter,
+  HttpNackFilter,
+  ClientNackFilter,
+  ServerContextFilter
+}
 import com.twitter.finagle.liveness.FailureDetector
-import com.twitter.finagle.http.netty.{Netty3ClientStreamTransport, Netty3HttpListener, Netty3HttpTransporter, Netty3ServerStreamTransport}
+import com.twitter.finagle.http.netty.{
+  Netty3ClientStreamTransport,
+  Netty3HttpListener,
+  Netty3HttpTransporter,
+  Netty3ServerStreamTransport
+}
 import com.twitter.finagle.http.service.HttpResponseClassifier
 import com.twitter.finagle.http2.{Http2Listener, Http2Transporter}
-import com.twitter.finagle.netty4.http.exp.{Netty4HttpListener, Netty4HttpTransporter}
-import com.twitter.finagle.netty4.Netty4HashedWheelTimer
+import com.twitter.finagle.netty4.http.{Netty4HttpListener, Netty4HttpTransporter}
 import com.twitter.finagle.netty4.http.{Netty4ClientStreamTransport, Netty4ServerStreamTransport}
 import com.twitter.finagle.server._
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
@@ -47,12 +56,11 @@ trait HttpRichClient { self: Client[Request, Response] =>
 /**
  * HTTP/1.1 protocol support, including client and server.
  */
-object Http extends Client[Request, Response] with HttpRichClient
-    with Server[Request, Response] {
+object Http extends Client[Request, Response] with HttpRichClient with Server[Request, Response] {
 
   // Toggles transport implementation to Http/2.
   private[this] object useHttp2 {
-    private[this] val underlying: Toggle[Int] = Toggles("com.twitter.finagle.http.UseHttp2")
+    private[this] val underlying: Toggle[Int] = Toggles("com.twitter.finagle.http.UseHttp2v2")
     def apply(): Boolean = underlying(ServerInfo().id.hashCode)
   }
 
@@ -106,20 +114,12 @@ object Http extends Client[Request, Response] with HttpRichClient
     param.ProtocolLibrary("http/2") +
     netty4.ssl.Alpn(ApplicationProtocols.Supported(Seq("h2", "http/1.1"))) +
     FailureDetector.Param(FailureDetector.NullConfig)
-    // The threshold failure detector doesn't seem to work properly for
-    // h2, so we're turning it off until we have time to investigate it.
+  // The threshold failure detector doesn't seem to work properly for
+  // h2, so we're turning it off until we have time to investigate it.
 
   private val protocolLibrary = param.ProtocolLibrary("http")
 
-  /** exposed for testing */
-  private[finagle] val ServerErrorsAsFailuresToggleId =
-    "com.twitter.finagle.http.serverErrorsAsFailuresV2"
-
-  private[this] val serverErrorsAsFailuresToggle =
-    http.Toggles(ServerErrorsAsFailuresToggleId)
-
-  private[this] def treatServerErrorsAsFailures: Boolean =
-    serverErrorsAsFailuresToggle(ServerInfo().id.hashCode)
+  private[this] def treatServerErrorsAsFailures: Boolean = serverErrorsAsFailures()
 
   /** exposed for testing */
   private[finagle] val responseClassifierParam: param.ResponseClassifier = {
@@ -131,9 +131,8 @@ object Http extends Client[Request, Response] with HttpRichClient
       def apply(a: A): B = pf(a)
     }
 
-    val srvErrsAsFailures = filtered(
-      () => treatServerErrorsAsFailures,
-      HttpResponseClassifier.ServerErrorsAsFailures)
+    val srvErrsAsFailures =
+      filtered(() => treatServerErrorsAsFailures, HttpResponseClassifier.ServerErrorsAsFailures)
 
     val rc = ResponseClassifier.named("ToggledServerErrorsAsFailures") {
       srvErrsAsFailures.orElse(ResponseClassifier.Default)
@@ -155,7 +154,10 @@ object Http extends Client[Request, Response] with HttpRichClient
       ): ServiceFactory[Request, Response] = {
         if (!streaming.enabled)
           new PayloadSizeFilter[Request, Response](
-            stats.statsReceiver, _.content.length, _.content.length).andThen(next)
+            stats.statsReceiver,
+            _.content.length,
+            _.content.length
+          ).andThen(next)
         else next
       }
     }
@@ -164,64 +166,71 @@ object Http extends Client[Request, Response] with HttpRichClient
     private val stack: Stack[ServiceFactory[Request, Response]] =
       StackClient.newStack
         .insertBefore(StackClient.Role.prepConn, ClientContextFilter.module)
+        // We insert the ClientNackFilter close to the bottom of the stack to
+        // eagerly transform the HTTP nack representation to a `Failure`.
+        .insertBefore(StackClient.Role.prepConn, ClientNackFilter.module)
+        // We add a DelayedRelease module at the bottom of the stack to ensure
+        // that the pooling levels above don't discard an active session.
         .replace(StackClient.Role.prepConn, DelayedRelease.module)
+        // Ensure that FactoryToService doesn't release the connection to the layers
+        // below when the response body hasn't been fully consumed.
         .replace(StackClient.Role.prepFactory, DelayedRelease.module)
         .replace(TraceInitializerFilter.role, new HttpClientTraceInitializer[Request, Response])
         .prepend(http.TlsFilter.module)
         .prepend(nonChunkedPayloadSize)
-        .prepend(new Stack.NoOpModule(http.filter.StatsFilter.role, http.filter.StatsFilter.description))
+        .prepend(
+          new Stack.NoOpModule(http.filter.StatsFilter.role, http.filter.StatsFilter.description)
+        )
 
     private val params: Stack.Params = {
       val vanilla = StackClient.defaultParams +
         protocolLibrary +
-        responseClassifierParam +
-        param.Timer(Netty4HashedWheelTimer)
+        responseClassifierParam
 
       if (useHttp2()) vanilla ++ Http2 else vanilla
     }
   }
 
   case class Client(
-      stack: Stack[ServiceFactory[Request, Response]] = Client.stack,
-      params: Stack.Params = Client.params)
-    extends EndpointerStackClient[Request, Response, Client]
-    with param.WithSessionPool[Client]
-    with param.WithDefaultLoadBalancer[Client] {
+    stack: Stack[ServiceFactory[Request, Response]] = Client.stack,
+    params: Stack.Params = Client.params
+  ) extends EndpointerStackClient[Request, Response, Client]
+      with param.WithSessionPool[Client]
+      with param.WithDefaultLoadBalancer[Client] {
 
     protected type In = Any
     protected type Out = Any
 
     protected def endpointer: Stackable[ServiceFactory[Request, Response]] =
       new EndpointerModule[Request, Response](
-        Seq(implicitly[Stack.Param[HttpImpl]]),
-        { (prms: Stack.Params, addr: InetSocketAddress) =>
+        Seq(implicitly[Stack.Param[HttpImpl]], implicitly[Stack.Param[param.Stats]]), {
+          (prms: Stack.Params, addr: InetSocketAddress) =>
+            val transporter = params[HttpImpl].transporter(prms)(addr)
+            new ServiceFactory[Request, Response] {
+              def apply(conn: ClientConnection): Future[Service[Request, Response]] =
+                // we do not want to capture and request specific Locals
+                // that would live for the life of the session.
+                Contexts.letClearAll {
+                  transporter().map { trans =>
+                    val streamTransport = prms[HttpImpl].clientTransport(trans)
 
-          val transporter = params[HttpImpl].transporter(prms)(addr)
-          new ServiceFactory[Request, Response] {
-            def apply(conn: ClientConnection): Future[Service[Request, Response]] =
-              // we do not want to capture and request specific Locals
-              // that would live for the life of the session.
-              Contexts.letClearAll {
-                transporter().map { trans =>
-                  val streamTransport = params[HttpImpl].clientTransport(trans)
-
-                  new HttpClientDispatcher(
-                    new HttpTransport(streamTransport),
-                    params[param.Stats].statsReceiver.scope(GenSerialClientDispatcher.StatsScope)
-                  )
+                    new HttpClientDispatcher(
+                      new HttpTransport(streamTransport),
+                      prms[param.Stats].statsReceiver.scope(GenSerialClientDispatcher.StatsScope)
+                    )
+                  }
                 }
+
+              def close(deadline: Time): Future[Unit] = transporter match {
+                case http2: Http2Transporter => http2.close(deadline)
+                case _ => Future.Done
               }
 
-            def close(deadline: Time): Future[Unit] = transporter match {
-              case http2: Http2Transporter => http2.close(deadline)
-              case _ => Future.Done
+              override def status: Status = transporter match {
+                case http2: Http2Transporter => http2.status
+                case _ => super.status
+              }
             }
-
-            override def status: Status = transporter match {
-              case http2: Http2Transporter => http2.status
-              case _ => super.status
-            }
-          }
         }
       )
 
@@ -240,11 +249,10 @@ object Http extends Client[Request, Response] with HttpRichClient
      * number of uncompressed bytes of header name/values.
      * These may be set independently via the .configured API.
      */
-    def withMaxHeaderSize(size: StorageUnit): Client = {
+    def withMaxHeaderSize(size: StorageUnit): Client =
       this
         .configured(http.param.MaxHeaderSize(size))
         .configured(http2.param.MaxHeaderListSize(Some(size)))
-    }
 
     /**
      * Configures the maximum initial line length the client can
@@ -288,7 +296,6 @@ object Http extends Client[Request, Response] with HttpRichClient
      * Otherwise, use [[org.jboss.netty.handler.codec.http.HttpContentCompressor HttpContentCompressor]]
      * for all content-types with specified compression level.
      */
-
     def withCompressionLevel(level: Int): Client =
       configured(http.param.CompressionLevel(level))
 
@@ -301,8 +308,6 @@ object Http extends Client[Request, Response] with HttpRichClient
     /**
      * Create a [[http.MethodBuilder]] for a given destination.
      *
-     * '''Experimental:''' This API is under construction.
-     *
      * @see [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]]
      */
     def methodBuilder(dest: String): http.MethodBuilder =
@@ -310,8 +315,6 @@ object Http extends Client[Request, Response] with HttpRichClient
 
     /**
      * Create a [[http.MethodBuilder]] for a given destination.
-     *
-     * '''Experimental:''' This API is under construction.
      *
      * @see [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]]
      */
@@ -334,9 +337,10 @@ object Http extends Client[Request, Response] with HttpRichClient
       new param.ClientTransportParams(this)
 
     override def withResponseClassifier(responseClassifier: service.ResponseClassifier): Client =
-     super.withResponseClassifier(responseClassifier)
+      super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client = super.withRetryBackoff(backoff)
+    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+      super.withRetryBackoff(backoff)
     override def withLabel(label: String): Client = super.withLabel(label)
     override def withStatsReceiver(statsReceiver: StatsReceiver): Client =
       super.withStatsReceiver(statsReceiver)
@@ -370,22 +374,23 @@ object Http extends Client[Request, Response] with HttpRichClient
         .replace(StackServer.Role.preparer, HttpNackFilter.module)
         .prepend(nonChunkedPayloadSize)
         .prepend(ServerContextFilter.module)
-        .prepend(new Stack.NoOpModule(http.filter.StatsFilter.role, http.filter.StatsFilter.description))
+        .prepend(
+          new Stack.NoOpModule(http.filter.StatsFilter.role, http.filter.StatsFilter.description)
+        )
 
     private val params: Stack.Params = {
       val vanilla = StackServer.defaultParams +
         protocolLibrary +
-        responseClassifierParam +
-        param.Timer(Netty4HashedWheelTimer)
+        responseClassifierParam
 
       if (useHttp2()) vanilla ++ Http2 else vanilla
     }
   }
 
   case class Server(
-      stack: Stack[ServiceFactory[Request, Response]] = Server.stack,
-      params: Stack.Params = Server.params)
-    extends StdStackServer[Request, Response, Server] {
+    stack: Stack[ServiceFactory[Request, Response]] = Server.stack,
+    params: Stack.Params = Server.params
+  ) extends StdStackServer[Request, Response, Server] {
 
     protected type In = Any
     protected type Out = Any
@@ -404,16 +409,24 @@ object Http extends Client[Request, Response] with HttpRichClient
       service: Service[Request, Response]
     ): HttpServerDispatcher = {
       val param.Stats(stats) = params[param.Stats]
-      new HttpServerDispatcher(
-        newStreamTransport(transport),
-        service,
-        stats.scope("dispatch"))
+      new HttpServerDispatcher(newStreamTransport(transport), service, stats.scope("dispatch"))
     }
 
     protected def copy1(
       stack: Stack[ServiceFactory[Request, Response]] = this.stack,
       params: Stack.Params = this.params
     ): Server = copy(stack, params)
+
+    /**
+     * For HTTP1*, configures the max size of headers
+     * For HTTP2, sets the MAX_HEADER_LIST_SIZE setting which is the maximum
+     * number of uncompressed bytes of header name/values.
+     * These may be set independently via the .configured API.
+     */
+    def withMaxHeaderSize(size: StorageUnit): Server =
+      this
+        .configured(http.param.MaxHeaderSize(size))
+        .configured(http2.param.MaxHeaderListSize(Some(size)))
 
     /**
      * Configures the maximum request size this server can receive.
@@ -465,6 +478,24 @@ object Http extends Client[Request, Response] with HttpRichClient
      */
     def withHttpStats: Server =
       withStack(stack.replace(http.filter.StatsFilter.role, http.filter.StatsFilter.module))
+
+    /**
+     * By default finagle-http automatically sends 100-CONTINUE responses to inbound
+     * requests which set the 'Expect: 100-Continue' header. Streaming servers will
+     * always return 100-CONTINUE. Non-streaming servers will compare the
+     * content-length header to the configured limit (see: `withMaxRequestSize`)
+     * and send either a 100-CONTINUE or 413-REQUEST ENTITY TOO LARGE as
+     * appropriate. This method disables those automatic responses.
+     *
+     * @note Servers operating as proxies should disable automatic responses in
+     *       order to allow origin servers to determine whether the expectation
+     *       can be met.
+     *
+     * @note Disabling automatic continues is only supported in
+     *       [[com.twitter.finagle.Http.Netty4Impl]] servers.
+     */
+    def withNoAutomaticContinue: Server =
+      configured(http.param.AutomaticContinue(false))
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905

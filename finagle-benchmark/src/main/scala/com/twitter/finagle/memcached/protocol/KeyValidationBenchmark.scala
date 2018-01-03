@@ -17,9 +17,11 @@ class KeyValidationBenchmark extends StdBenchAnnotations {
     val rnd = new Random(52629004)
     Array.fill(N) {
       val bytes =
-        List.fill(len) {
-          rnd.nextPrintableChar().toByte
-        }.toArray
+        List
+          .fill(len) {
+            rnd.nextPrintableChar().toByte
+          }
+          .toArray
       Seq(Buf.ByteArray.Owned(bytes))
     }
   }
@@ -31,7 +33,7 @@ class KeyValidationBenchmark extends StdBenchAnnotations {
     i = 0
 
   @Benchmark
-  def createGet: KeyValidation = {
+  def createGet: Command = {
     i += 1
     Get(keys(i % N))
   }

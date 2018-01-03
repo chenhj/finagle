@@ -5,6 +5,8 @@ import com.twitter.finagle.netty4.param.Allocator
 import com.twitter.finagle.netty4.ssl.Netty4SslConfigurations
 import com.twitter.finagle.ssl._
 import com.twitter.finagle.ssl.client.{SslClientConfiguration, SslClientEngineFactory}
+import com.twitter.util.{Try, Return, Throw}
+import com.twitter.util.security.X509CertificateFile
 import io.netty.buffer.ByteBufAllocator
 import io.netty.handler.ssl.{OpenSsl, SslContext, SslContextBuilder}
 import javax.net.ssl.SSLEngine
@@ -14,7 +16,7 @@ import javax.net.ssl.SSLEngine
  * recommended path for using native SSL/TLS engines with Finagle.
  */
 class Netty4ClientEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
-  extends SslClientEngineFactory {
+    extends SslClientEngineFactory {
 
   private[this] def mkSslEngine(
     context: SslContext,
@@ -31,15 +33,20 @@ class Netty4ClientEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
   private[this] def addKey(
     builder: SslContextBuilder,
     keyCredentials: KeyCredentials
-  ): SslContextBuilder =
+  ): Try[SslContextBuilder] =
     keyCredentials match {
       case KeyCredentials.Unspecified =>
-        builder // Do Nothing
+        Return(builder) // Do Nothing
       case KeyCredentials.CertAndKey(certFile, keyFile) =>
-        builder.keyManager(certFile, keyFile)
-      case _: KeyCredentials.CertKeyAndChain =>
-        throw SslConfigurationException.notSupported(
-          "KeyCredentials.CertKeyAndChain", "Netty4ClientEngineFactory")
+        Try {
+          builder.keyManager(certFile, keyFile)
+        }
+      case KeyCredentials.CertKeyAndChain(certFile, keyFile, chainFile) =>
+        for {
+          key <- Netty4SslConfigurations.getPrivateKey(keyFile)
+          cert <- new X509CertificateFile(certFile).readX509Certificate()
+          chain <- new X509CertificateFile(chainFile).readX509Certificate()
+        } yield builder.keyManager(key, cert, chain)
     }
 
   /**
@@ -58,11 +65,14 @@ class Netty4ClientEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
    */
   def apply(address: Address, config: SslClientConfiguration): Engine = {
     val builder = SslContextBuilder.forClient()
-    val withKey = addKey(builder, config.keyCredentials)
+    val withKey = addKey(builder, config.keyCredentials) match {
+      case Return(builderWithKey) => builderWithKey
+      case Throw(ex) => throw new SslConfigurationException(ex.getMessage, ex)
+    }
     val withProvider = Netty4SslConfigurations.configureProvider(withKey, forceJdk)
     val withTrust = Netty4SslConfigurations.configureTrust(withProvider, config.trustCredentials)
-    val withAppProtocols = Netty4SslConfigurations.configureApplicationProtocols(
-      withTrust, config.applicationProtocols)
+    val withAppProtocols =
+      Netty4SslConfigurations.configureApplicationProtocols(withTrust, config.applicationProtocols)
     val context = withAppProtocols.build()
     val engine = new Engine(mkSslEngine(context, address, config))
     SslClientEngineFactory.configureEngine(engine, config)

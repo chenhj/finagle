@@ -39,21 +39,21 @@ private[finagle] class ConnectionManager {
     message match {
       case req: Request => observeRequest(req, onFinish)
       case rep: Response => observeResponse(rep, onFinish)
-      case _ => isKeepAlive = false  // conservative
+      case _ => isKeepAlive = false // conservative
     }
   }
 
   def observeRequest(request: Request, onFinish: Future[Unit]): Unit = synchronized {
     pendingResponses += 1
     isIdle = false
-    isKeepAlive = request.isKeepAlive
+    isKeepAlive = request.keepAlive
     handleIfStream(onFinish)
   }
 
   def observeResponse(response: Response, onFinish: Future[Unit]): Unit = synchronized {
     pendingResponses -= 1
 
-    if (!isKeepAlive || mustCloseOnFinish(response) || !response.isKeepAlive) {
+    if (!isKeepAlive || mustCloseOnFinish(response) || !response.keepAlive) {
       // We are going to close the connection after this response so we ensure that
       // the 'Connection' header is set to 'close' in order to give the client notice.
       response.headerMap.set(Fields.Connection, "close")
@@ -96,8 +96,8 @@ private[finagle] class ConnectionManager {
   // Some status codes are not permitted to have a message body.
   private[this] def mayHaveContent(status: Status): Boolean = status match {
     case Status.Informational(_) => false // all 1xx status codes must not have a body
-    case Status.NoContent => false        // 204 No Content
-    case Status.NotModified => false      // 304 Not Modified
+    case Status.NoContent => false // 204 No Content
+    case Status.NotModified => false // 304 Not Modified
     case _ => true
   }
 }

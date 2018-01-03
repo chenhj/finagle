@@ -2,6 +2,8 @@ package com.twitter.finagle.integration
 
 import com.twitter.finagle.Stack
 import com.twitter.finagle.integration.thriftscala.Echo
+import com.twitter.finagle.memcached.protocol.Value
+import com.twitter.finagle.memcached.protocol.text.server.ResponseToBuf
 import com.twitter.finagle.memcached.{protocol => memcached}
 import com.twitter.finagle.mux.{transport => mux}
 import com.twitter.finagle.thrift.transport.{netty4 => thrift}
@@ -39,15 +41,15 @@ class DirectBufferLifecycleTest extends FunSuite {
     msg: Buf,
     pipelineInit: (ChannelPipeline => Unit)
   ) = test(s"$protocol framer releases inbound direct byte bufs") {
-      val e = new EmbeddedChannel()
-      pipelineInit(e.pipeline)
-      val direct = Unpooled.directBuffer()
-      direct.writeBytes(Buf.ByteArray.Owned.extract(msg))
-      assert(direct.refCnt() == 1)
-      e.writeInbound(direct)
-      assert(direct.refCnt() == 0)
-      val framed: T = e.readInbound[T]()
-    }
+    val e = new EmbeddedChannel()
+    pipelineInit(e.pipeline)
+    val direct = Unpooled.directBuffer()
+    direct.writeBytes(Buf.ByteArray.Owned.extract(msg))
+    assert(direct.refCnt() == 1)
+    e.writeInbound(direct)
+    assert(direct.refCnt() == 0)
+    val framed: T = e.readInbound[T]()
+  }
 
   testDirect[Buf](
     protocol = "mux client/server",
@@ -67,12 +69,10 @@ class DirectBufferLifecycleTest extends FunSuite {
 
   testDirect[Buf](
     protocol = "memcached client",
-    msg = {
-      val cte = new memcached.text.CommandToBuf
-      val command = memcached.Get(Seq(Buf.Utf8("1")))
-      cte.encode(command)
-    },
-    pipelineInit = memcached.text.transport.Netty4ClientFramer
+    msg = ResponseToBuf.encode(
+      memcached.Values(Seq(Value(Buf.Utf8("key"), Buf.Utf8("1"), None, None)))
+    ),
+    pipelineInit = memcached.text.transport.MemcachedNetty4ClientFramer
   )
 
   testDirect[Array[Byte]](

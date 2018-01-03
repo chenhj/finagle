@@ -9,26 +9,24 @@ import com.twitter.finagle.mux.transport.{BadMessageException, Message}
 import com.twitter.finagle.server.StdStackServer
 import com.twitter.finagle.service.Retries
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.finagle.thrift.ClientId
 import com.twitter.finagle.tracing._
-import com.twitter.io.{Buf, ByteReader, ByteWriter}
+import com.twitter.io.{Buf, BufByteWriter, ByteReader}
 import com.twitter.util._
 import java.io.{PrintWriter, StringWriter}
 import java.net.{InetAddress, InetSocketAddress, ServerSocket, Socket}
 import java.util.concurrent.atomic.AtomicInteger
-import org.junit.runner.RunWith
 import org.scalactic.source.Position
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
+import org.scalatest.junit.AssertionsForJUnit
 import org.scalatest.{BeforeAndAfter, FunSuite, Tag}
 import scala.language.reflectiveCalls
 
-@RunWith(classOf[JUnitRunner])
-abstract class AbstractEndToEndTest extends FunSuite
-  with Eventually
-  with IntegrationPatience
-  with BeforeAndAfter
-  with AssertionsForJUnit {
+abstract class AbstractEndToEndTest
+    extends FunSuite
+    with Eventually
+    with IntegrationPatience
+    with BeforeAndAfter
+    with AssertionsForJUnit {
 
   def implName: String
   def clientImpl(): StdStackClient[Request, Response, Mux.Client]
@@ -47,23 +45,27 @@ abstract class AbstractEndToEndTest extends FunSuite
 
   // turn off failure detector since we don't need it for these tests.
   override def test(testName: String, testTags: Tag*)(f: => Any)(implicit pos: Position) {
-    super.test(testName, testTags:_*) {
+    super.test(testName, testTags: _*) {
       liveness.sessionFailureDetector.let("none") { f }
     }
   }
 
-
   test(s"$implName: Dtab propagation") {
 
-    val server = serverImpl.serve("localhost:*", Service.mk[Request, Response] { _ =>
-      val stringer = new StringWriter
-      val printer = new PrintWriter(stringer)
-      Dtab.local.print(printer)
-      Future.value(Response(Buf.Utf8(stringer.toString)))
-    })
+    val server = serverImpl.serve(
+      "localhost:*",
+      Service.mk[Request, Response] { _ =>
+        val stringer = new StringWriter
+        val printer = new PrintWriter(stringer)
+        Dtab.local.print(printer)
+        Future.value(Response(Buf.Utf8(stringer.toString)))
+      }
+    )
 
     val client = clientImpl.newService(
-      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client")
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
 
     Dtab.unwind {
       Dtab.local ++= Dtab.read("/foo=>/bar; /web=>/$/inet/twitter.com/80")
@@ -79,13 +81,15 @@ abstract class AbstractEndToEndTest extends FunSuite
 
   test(s"$implName: (no) Dtab propagation") {
     val server = serverImpl.serve("localhost:*", Service.mk[Request, Response] { _ =>
-      val bw = ByteWriter.fixed(4)
+      val bw = BufByteWriter.fixed(4)
       bw.writeIntBE(Dtab.local.size)
       Future.value(Response(bw.owned()))
     })
 
     val client = clientImpl.newService(
-      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client")
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
 
     val payload = Await.result(client(Request.empty), 30.seconds).body
     val br = ByteReader(payload)
@@ -120,20 +124,25 @@ abstract class AbstractEndToEndTest extends FunSuite
     client = clientImpl
       .configured(param.Tracer(tracer))
       .newService(
-        Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "theClient")
+        Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+        "theClient"
+      )
 
     Await.result(client(Request.empty), 30.seconds)
 
-    assertAnnotationsInOrder(tracer.toSeq, Seq(
-      Annotation.ServiceName("theClient"),
-      Annotation.ClientSend(),
-      Annotation.BinaryAnnotation("clnt/mux/enabled", true),
-      Annotation.ServiceName("theServer"),
-      Annotation.ServerRecv(),
-      Annotation.BinaryAnnotation("srv/mux/enabled", true),
-      Annotation.ServerSend(),
-      Annotation.ClientRecv()
-    ))
+    assertAnnotationsInOrder(
+      tracer.toSeq,
+      Seq(
+        Annotation.ServiceName("theClient"),
+        Annotation.ClientSend(),
+        Annotation.BinaryAnnotation("clnt/mux/enabled", true),
+        Annotation.ServiceName("theServer"),
+        Annotation.ServerRecv(),
+        Annotation.BinaryAnnotation("srv/mux/enabled", true),
+        Annotation.ServerSend(),
+        Annotation.ClientRecv()
+      )
+    )
 
     Await.result(server.close(), 30.seconds)
     Await.result(client.close(), 30.seconds)
@@ -182,8 +191,9 @@ abstract class AbstractEndToEndTest extends FunSuite
     // Don't mask failures so we can examine which flags were propagated
     // Remove the retries module because otherwise requests will be retried until the default budget
     // is exceeded and then flagged as NonRetryable.
-    val client = clientImpl.transformed(_.remove(Failure.role).remove(Retries.Role))
-        .newService(address, "client")
+    val client = clientImpl
+      .transformed(_.remove(Failure.role).remove(Retries.Role))
+      .newService(address, "client")
 
     def check(f: Failure): Unit = {
       respondWith = f
@@ -213,7 +223,9 @@ abstract class AbstractEndToEndTest extends FunSuite
 
     val server = serverImpl.serve("localhost:*", factory)
     val client = clientImpl.newService(
-      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client")
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
 
     // This will try until it exhausts its budget. That's o.k.
     val failure = intercept[Failure] { Await.result(client(Request.empty), 30.seconds) }
@@ -268,36 +280,36 @@ ed - ../../../../../../../../finagle-core/src/main/scala/com/twitter/finagle/loa
 .
 w
 EOF
-  */
+   */
   if (!Option(System.getProperty("SKIP_FLAKY")).isDefined)
-  test(s"$implName: draining and restart") {
-    val echo =
-      new Service[Request, Response] {
-        def apply(req: Request) = Future.value(Response(req.body))
-      }
-    val req = Request(Path.empty, Buf.Utf8("hello, world!"))
+    test(s"$implName: draining and restart") {
+      val echo =
+        new Service[Request, Response] {
+          def apply(req: Request) = Future.value(Response(req.body))
+        }
+      val req = Request(Path.empty, Buf.Utf8("hello, world!"))
 
-    // We need to reserve a port here because we're going to be
-    // rebinding the server.
-    val port = nextPort()
-    val client = clientImpl.newService(s"localhost:$port")
-    var server = serverImpl.serve(s"localhost:$port", echo)
+      // We need to reserve a port here because we're going to be
+      // rebinding the server.
+      val port = nextPort()
+      val client = clientImpl.newService(s"localhost:$port")
+      var server = serverImpl.serve(s"localhost:$port", echo)
 
-    // Activate the client; this establishes a session.
-    Await.result(client(req), 5.seconds)
+      // Activate the client; this establishes a session.
+      Await.result(client(req), 5.seconds)
 
-    // This will stop listening, drain, and then close the session.
-    Await.result(server.close(), 30.seconds)
+      // This will stop listening, drain, and then close the session.
+      Await.result(server.close(), 30.seconds)
 
-    // Thus the next request should fail at session establishment.
-    intercept[Throwable] { Await.result(client(req), 5.seconds) }
+      // Thus the next request should fail at session establishment.
+      intercept[Throwable] { Await.result(client(req), 5.seconds) }
 
-    // And eventually we recover.
-    server = serverImpl.serve(s"localhost:$port", echo)
-    eventually { Await.result(client(req), 5.seconds) }
+      // And eventually we recover.
+      server = serverImpl.serve(s"localhost:$port", echo)
+      eventually { Await.result(client(req), 5.seconds) }
 
-    Await.result(server.close(), 30.seconds)
-  }
+      Await.result(server.close(), 30.seconds)
+    }
 
   test(s"$implName: responds to lease") {
     Time.withCurrentTimeFrozen { ctl =>
@@ -320,13 +332,16 @@ EOF
         .configured(Lessor.Param(lessor))
         .serve("localhost:*", new Service[mux.Request, mux.Response] {
           def apply(req: Request) = ???
-        }
-      )
+        })
 
       val sr = new InMemoryStatsReceiver
 
-      val factory = clientImpl.configured(param.Stats(sr)).newClient(
-        Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client")
+      val factory = clientImpl
+        .configured(param.Stats(sr))
+        .newClient(
+          Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+          "client"
+        )
 
       val fclient = factory()
       eventually { assert(fclient.isDefined) }
@@ -341,7 +356,7 @@ EOF
         case _ => false
       }
 
-      val leaseCtr: () => Int = { () =>
+      val leaseCtr: () => Long = { () =>
         val Some((_, ctr)) = sr.counters.find {
           case (_ +: Seq("mux", "leased"), value) => true
           case _ => false
@@ -379,7 +394,9 @@ EOF
     val client = clientImpl
       .withStatsReceiver(sr)
       .newService(
-        Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client")
+        Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+        "client"
+      )
 
     Await.ready(client(Request(Path.empty, Buf.Utf8("." * 10))), 5.seconds)
 
@@ -438,7 +455,8 @@ EOF
     try {
       server.start()
       val sr = new InMemoryStatsReceiver
-      val client = clientImpl.withLabel(serviceName)
+      val client = clientImpl
+        .withLabel(serviceName)
         .withStatsReceiver(sr)
         .withMonitor(monitor)
         .newService(s"${InetAddress.getLoopbackAddress.getHostAddress}:${server.port}")
@@ -461,7 +479,7 @@ EOF
       // RemoteInfo should have been added by the client stack
       failure.getSource(Failure.Source.RemoteInfo) match {
         case Some(a: RemoteInfo.Available) =>
-          assert(a.downstreamId == Some(ClientId(serviceName)))
+          assert(a.downstreamLabel == Some(serviceName))
           assert(a.downstreamAddr.isDefined)
 
         case other => fail(s"Unexpected remote info: $other")

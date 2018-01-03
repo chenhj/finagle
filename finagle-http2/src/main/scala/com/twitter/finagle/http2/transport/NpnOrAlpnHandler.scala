@@ -3,10 +3,11 @@ package com.twitter.finagle.http2.transport
 import com.twitter.finagle.param.Stats
 import com.twitter.finagle.Stack
 import com.twitter.finagle.http2.Settings
-import com.twitter.finagle.netty4.http.exp._
+import com.twitter.finagle.netty4.http._
 import io.netty.channel.{Channel, ChannelHandlerContext, ChannelInitializer, ChannelOption}
 import io.netty.handler.codec.http2.{
   Http2Codec,
+  Http2CodecBuilder,
   Http2FrameLogger,
   Http2StreamChannelBootstrap
 }
@@ -14,7 +15,7 @@ import io.netty.handler.logging.LogLevel
 import io.netty.handler.ssl.{ApplicationProtocolNames, ApplicationProtocolNegotiationHandler}
 
 private[http2] class NpnOrAlpnHandler(init: ChannelInitializer[Channel], params: Stack.Params)
-  extends ApplicationProtocolNegotiationHandler(ApplicationProtocolNames.HTTP_1_1) {
+    extends ApplicationProtocolNegotiationHandler(ApplicationProtocolNames.HTTP_1_1) {
 
   private[this] val Stats(statsReceiver) = params[Stats]
   private[this] val upgradeCounter = statsReceiver.scope("upgrade").counter("success")
@@ -42,10 +43,16 @@ private[http2] class NpnOrAlpnHandler(init: ChannelInitializer[Channel], params:
           .option(ChannelOption.ALLOCATOR, ctx.alloc())
           .handler(initializer)
 
-        ctx.pipeline().replace(
-          HttpCodecName,
-          "http2Codec",
-          new Http2Codec(true /* server */ , bootstrap, logger, initialSettings))
+        ctx
+          .pipeline()
+          .replace(
+            HttpCodecName,
+            "http2Codec",
+            new Http2CodecBuilder(true /* server */, bootstrap)
+              .frameLogger(logger)
+              .initialSettings(initialSettings)
+              .build()
+          )
 
       case ApplicationProtocolNames.HTTP_1_1 =>
       // The Http codec is already in the pipeline, so we are good!

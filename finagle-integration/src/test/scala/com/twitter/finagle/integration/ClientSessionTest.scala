@@ -2,7 +2,8 @@ package com.twitter.finagle.integration
 
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.finagle._
-import com.twitter.finagle.http.{Request, Response}
+import com.twitter.finagle.http
+import com.twitter.finagle.memcached.{protocol => memcached}
 import com.twitter.finagle.http.codec.HttpClientDispatcher
 import com.twitter.finagle.http.exp.IdentityStreamTransport
 import com.twitter.finagle.stats.NullStatsReceiver
@@ -43,66 +44,70 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
   }
 
   testSessionStatus[mux.transport.Message, mux.transport.Message](
-    "mux-transport",
-    { tr: Transport[mux.transport.Message, mux.transport.Message] =>
+    "mux-transport", { tr: Transport[mux.transport.Message, mux.transport.Message] =>
       val session: mux.ClientSession =
         new mux.ClientSession(tr, liveness.FailureDetector.NullConfig, "test", NullStatsReceiver)
-      () => session.status
+      () =>
+        session.status
     }
   )
 
   testSessionStatus[mux.transport.Message, mux.transport.Message](
-    "mux-dispatcher",
-    { tr: Transport[mux.transport.Message, mux.transport.Message] =>
+    "mux-dispatcher", { tr: Transport[mux.transport.Message, mux.transport.Message] =>
       val dispatcher = mux.ClientDispatcher.newRequestResponse(tr)
-      () => dispatcher.status
+      () =>
+        dispatcher.status
     }
   )
 
   testSessionStatus(
-    "http-transport",
-    { tr: Transport[Any, Any] =>
+    "http-transport", { tr: Transport[Any, Any] =>
       val manager = mock[http.codec.ConnectionManager]
       val closeP = new Promise[Unit]
       when(manager.shouldClose).thenReturn(false)
       when(manager.onClose).thenReturn(closeP)
       val wrappedT = new http.HttpTransport(
-        new IdentityStreamTransport(Transport.cast[Request, Response](tr)), manager)
-      () => wrappedT.status
+        new IdentityStreamTransport(Transport.cast[http.Request, http.Response](tr)),
+        manager
+      )
+      () =>
+        wrappedT.status
     }
   )
 
   testSessionStatus(
-    "http-dispatcher",
-    { tr: Transport[Any, Any] =>
+    "http-dispatcher", { tr: Transport[Any, Any] =>
       val dispatcher = new HttpClientDispatcher(
-        new IdentityStreamTransport(Transport.cast[Request, Response](tr)),
+        new IdentityStreamTransport(Transport.cast[http.Request, http.Response](tr)),
         NullStatsReceiver
       )
-      () => dispatcher.status
+      () =>
+        dispatcher.status
     }
   )
 
   class MyClient extends com.twitter.finagle.Memcached.Client {
-    def newDisp(transport: Transport[Buf, Buf]):
-      Service[memcached.protocol.Command, memcached.protocol.Response] =
+    def newDisp(
+      transport: Transport[Buf, memcached.Response]
+    ): Service[memcached.Command, memcached.Response] =
       super.newDispatcher(transport)
   }
 
   testSessionStatus(
-    "memcached-dispatcher",
-    { tr: Transport[Buf, Buf] =>
+    "memcached-dispatcher", { tr: Transport[Buf, memcached.Response] =>
       val cl: MyClient = new MyClient
       val svc = cl.newDisp(tr)
-      () => svc.status
+      () =>
+        svc.status
     }
   )
 
   testSessionStatus(
-    "mysql-dispatcher",
-    { tr: Transport[mysql.transport.Packet, mysql.transport.Packet] =>
+    "mysql-dispatcher", { tr: Transport[mysql.transport.Packet, mysql.transport.Packet] =>
       val handshake = mysql.Handshake(Some("username"), Some("password"))
-      val dispatcher = new mysql.ClientDispatcher(tr, handshake)
-      () => dispatcher.status
-    })
+      val dispatcher = new mysql.ClientDispatcher(tr, handshake, false)
+      () =>
+        dispatcher.status
+    }
+  )
 }

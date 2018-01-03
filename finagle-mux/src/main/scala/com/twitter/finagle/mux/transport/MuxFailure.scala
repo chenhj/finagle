@@ -1,7 +1,7 @@
 package com.twitter.finagle.mux.transport
 
 import com.twitter.finagle.FailureFlags
-import com.twitter.io.{Buf, ByteReader, ByteWriter}
+import com.twitter.io.{Buf, BufByteWriter, ByteReader}
 
 private[mux] object MuxFailure {
   private val ContextId = Buf.Utf8("MuxFailure")
@@ -22,7 +22,6 @@ private[mux] object MuxFailure {
    * Indicates that this work should not be retried at any level
    */
   val NonRetryable: Long = 1L << 2
-
 
   /**
    * A MuxFailure that contains no additional information
@@ -109,6 +108,6 @@ private[mux] case class MuxFailure(flags: Long) {
    */
   def contexts: Seq[(Buf, Buf)] = {
     if (this == Empty) Nil
-    else Seq((ContextId, ByteWriter.fixed(8).writeLongBE(flags).owned()))
+    else Seq((ContextId, BufByteWriter.fixed(8).writeLongBE(flags).owned()))
   }
 }

@@ -17,10 +17,8 @@ import org.scalatest.FunSuite
 
 class MultiplexedTransporterTest extends FunSuite {
 
-  class SlowClosingQueue(
-      left: AsyncQueue[StreamMessage],
-      right: AsyncQueue[StreamMessage])
-    extends QueueTransport[StreamMessage, StreamMessage](left, right) {
+  class SlowClosingQueue(left: AsyncQueue[StreamMessage], right: AsyncQueue[StreamMessage])
+      extends QueueTransport[StreamMessage, StreamMessage](left, right) {
     override val onClose: Future[Throwable] = Future.never
   }
 
@@ -45,6 +43,7 @@ class MultiplexedTransporterTest extends FunSuite {
       throw Await.result(second.onClose, 5.seconds)
     }
     assert(exn.flags == FailureFlags.Retryable)
+    assert(multi.numChildren == 1)
   }
 
   test("MultiplexedTransporter children should kill themselves when they grow to a bad stream id") {
@@ -68,6 +67,24 @@ class MultiplexedTransporterTest extends FunSuite {
       throw Await.result(child.onClose, 5.seconds)
     }
     assert(exn.flags == FailureFlags.Retryable)
+    assert(multi.numChildren == 0)
+  }
+
+  test("MultiplexedTransporter children should disappear when they die") {
+    val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
+    val transport = new SlowClosingQueue(writeq, readq)
+    val addr = new SocketAddress {}
+    val multi = new MultiplexedTransporter(transport, addr, Stack.Params.empty)
+
+    val conn = multi().get
+
+    conn.write(H1Req)
+    assert(multi.numChildren == 1)
+
+    assert(!conn.onClose.isDefined)
+    Await.result(conn.close(), 5.seconds)
+
+    assert(multi.numChildren == 0)
   }
 
   test("MultiplexedTransporter children can't even") {
@@ -86,6 +103,7 @@ class MultiplexedTransporterTest extends FunSuite {
       throw Await.result(child.onClose, 5.seconds)
     }
     assert(exn.flags == FailureFlags.Retryable)
+    assert(multi.numChildren == 0)
   }
 
   test("MultiplexedTransporter forbids new child streams on GOAWAY") {
@@ -100,6 +118,7 @@ class MultiplexedTransporterTest extends FunSuite {
     intercept[DeadConnectionException] {
       multi().get
     }
+    assert(multi.numChildren == 0)
   }
 
   test("MultiplexedTransporter respects last stream ID on GOAWAY & closes children") {
@@ -110,7 +129,11 @@ class MultiplexedTransporterTest extends FunSuite {
 
     val c1, c3 = multi().get
 
-    val res = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("whatever", StandardCharsets.UTF_8))
+    val res = new DefaultFullHttpResponse(
+      HttpVersion.HTTP_1_1,
+      HttpResponseStatus.OK,
+      Unpooled.copiedBuffer("whatever", StandardCharsets.UTF_8)
+    )
 
     // Both streams make a request
     c1.write(H1Req)
@@ -133,6 +156,7 @@ class MultiplexedTransporterTest extends FunSuite {
     intercept[StreamClosedException] {
       Await.result(c3.read(), 5.seconds)
     }
+    assert(multi.numChildren == 0)
   }
 
   test("MultiplexedTransporter reflects detector status") {
@@ -140,12 +164,15 @@ class MultiplexedTransporterTest extends FunSuite {
     val transport = new SlowClosingQueue(writeq, readq)
     val addr = new SocketAddress {}
     var cur: Status = Status.Open
-    val params = Stack.Params.empty + FailureDetector.Param(new FailureDetector.MockConfig(() => cur))
+    val params = Stack.Params.empty + FailureDetector.Param(
+      new FailureDetector.MockConfig(() => cur)
+    )
     val multi = new MultiplexedTransporter(transport, addr, params)
 
     assert(multi.status == Status.Open)
     cur = Status.Busy
     assert(multi.status == Status.Busy)
+    assert(multi.numChildren == 0)
   }
 
   test("MultiplexedTransporter call to first() provides child with streamId == 1") {
@@ -169,6 +196,7 @@ class MultiplexedTransporterTest extends FunSuite {
 
     // An attempt to hide implementation details.
     assert(cA.curId - cB.curId == 2)
+    assert(multi.numChildren == 2)
   }
 
   test("Idle children kill themselves when read") {
@@ -185,6 +213,7 @@ class MultiplexedTransporterTest extends FunSuite {
 
     assert(thrown.isFlagged(FailureFlags.NonRetryable))
     assert(child.status == Status.Closed)
+    assert(multi.numChildren == 0)
   }
 
   test("Children can be closed multiple times, but keep the first reason") {
@@ -206,6 +235,7 @@ class MultiplexedTransporterTest extends FunSuite {
     }
 
     assert(thrown.getMessage.equals("derp"))
+    assert(multi.numChildren == 0)
   }
 
   test("RST is sent when a message is received for a closed stream") {
@@ -213,7 +243,9 @@ class MultiplexedTransporterTest extends FunSuite {
     val transport = new SlowClosingQueue(writeq, readq)
     val addr = new SocketAddress {}
     var cur: Status = Status.Open
-    val params = Stack.Params.empty + FailureDetector.Param(new FailureDetector.MockConfig(() => cur))
+    val params = Stack.Params.empty + FailureDetector.Param(
+      new FailureDetector.MockConfig(() => cur)
+    )
     val multi = new MultiplexedTransporter(transport, addr, params)
 
     multi.setStreamId(5)
@@ -222,6 +254,7 @@ class MultiplexedTransporterTest extends FunSuite {
 
     val result = Await.result(writeq.poll(), 5.seconds)
     assert(result == Rst(3, Http2Error.STREAM_CLOSED.code))
+    assert(multi.numChildren == 0)
   }
 
   test("GOAWAY w/ PROTOCOL_ERROR is sent when a message is received for an idle stream") {
@@ -229,7 +262,9 @@ class MultiplexedTransporterTest extends FunSuite {
     val transport = new SlowClosingQueue(writeq, readq)
     val addr = new SocketAddress {}
     var cur: Status = Status.Open
-    val params = Stack.Params.empty + FailureDetector.Param(new FailureDetector.MockConfig(() => cur))
+    val params = Stack.Params.empty + FailureDetector.Param(
+      new FailureDetector.MockConfig(() => cur)
+    )
     val multi = new MultiplexedTransporter(transport, addr, params)
 
     multi.setStreamId(5)
@@ -240,6 +275,7 @@ class MultiplexedTransporterTest extends FunSuite {
     val GoAway(_, lastId, errorCode) = result
     assert(lastId == 5)
     assert(errorCode == Http2Error.PROTOCOL_ERROR.code)
+    assert(multi.numChildren == 0)
   }
 
   test("RST is not sent when RST is received for a nonexistent stream") {
@@ -247,7 +283,9 @@ class MultiplexedTransporterTest extends FunSuite {
     val transport = new SlowClosingQueue(writeq, readq)
     val addr = new SocketAddress {}
     var cur: Status = Status.Open
-    val params = Stack.Params.empty + FailureDetector.Param(new FailureDetector.MockConfig(() => cur))
+    val params = Stack.Params.empty + FailureDetector.Param(
+      new FailureDetector.MockConfig(() => cur)
+    )
     val multi = new MultiplexedTransporter(transport, addr, params)
 
     readq.offer(Rst(11, Http2Error.INTERNAL_ERROR.code))
@@ -255,5 +293,6 @@ class MultiplexedTransporterTest extends FunSuite {
     intercept[TimeoutException] {
       Await.result(writeq.poll(), 100.milliseconds)
     }
+    assert(multi.numChildren == 0)
   }
 }

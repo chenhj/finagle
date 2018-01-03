@@ -8,8 +8,8 @@ import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle.mux.lease.exp.Lessor
 import com.twitter.finagle.mux.transport._
 import com.twitter.finagle.mux.{Handshake, Toggles}
-import com.twitter.finagle.netty4.{Netty4HashedWheelTimer, Netty4Listener, Netty4Transporter}
-import com.twitter.finagle.param.{ProtocolLibrary, Timer, WithDefaultLoadBalancer}
+import com.twitter.finagle.netty4.{Netty4Listener, Netty4Transporter}
+import com.twitter.finagle.param.{ProtocolLibrary, WithDefaultLoadBalancer}
 import com.twitter.finagle.pool.SingletonPool
 import com.twitter.finagle.server._
 import com.twitter.finagle.stats.StatsReceiver
@@ -37,6 +37,7 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
    * Mux-specific stack params.
    */
   object param {
+
     /**
      * A class eligible for configuring the maximum size of a mux frame.
      * Any message that is larger than this value is fragmented across multiple
@@ -65,26 +66,17 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
      * servers and clients can use the same parameter).
      */
     case class MuxImpl(
-        transporter: Stack.Params => SocketAddress => Transporter[Buf, Buf],
-        listener: Stack.Params => Listener[Buf, Buf]) {
+      transporter: Stack.Params => SocketAddress => Transporter[Buf, Buf],
+      listener: Stack.Params => Listener[Buf, Buf]
+    ) {
       def mk(): (MuxImpl, Stack.Param[MuxImpl]) =
         (this, MuxImpl.param)
     }
 
-
     object MuxImpl {
-      private val RefCountToggleId: String = "com.twitter.finagle.mux.RefCountControlMessages"
-      private val refCountControlToggle: Toggle[Int] = Toggles(RefCountToggleId)
-      private def refCountControl: Boolean = refCountControlToggle(ServerInfo().id.hashCode)
-
-      /**
-       * A [[MuxImpl]] that uses netty4 as the underlying I/O multiplexer.
-       *
-       * @note this is experimental and not yet tested in production.
-       */
-      val Netty4 = MuxImpl(
-        params => Netty4Transporter.raw(CopyingFramer, _, params),
-        params => Netty4Listener(CopyingFramer, params))
+      private val TlsHeadersToggleId: String = "com.twitter.finagle.mux.TlsHeaders"
+      private val tlsHeadersToggle: Toggle[Int] = Toggles(TlsHeadersToggleId)
+      private[Mux] def tlsHeaders: Boolean = tlsHeadersToggle(ServerInfo().id.hashCode)
 
       /**
        * A [[MuxImpl]] that uses netty4 as the underlying I/O multiplexer and
@@ -107,18 +99,16 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
               transportFactory = new RefCountingTransport(_)
             )
           else {
-            log.info("disabled Netty4RefCountingControl decoder due to non-sentinel MaxFrameSize value")
+            log.info(
+              "disabled Netty4RefCountingControl decoder due to non-sentinel MaxFrameSize value"
+            )
             Netty4Transporter.raw(CopyingFramer, _, params)
           }
         },
         params => Netty4Listener(CopyingFramer, params)
       )
 
-      implicit val param = Stack.Param(
-        // note that ref-counting toggle is dependent on n4 toggle.
-        if (refCountControl) Netty4RefCountingControl
-        else Netty4
-      )
+      implicit val param = Stack.Param(Netty4RefCountingControl)
     }
   }
 
@@ -134,8 +124,18 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
     maxFrameSize: StorageUnit,
     statsReceiver: StatsReceiver
   ): Handshake.Negotiator = (peerHeaders, trans) => {
-    val remoteMaxFrameSize = Handshake.valueOf(MuxFramer.Header.KeyBuf, peerHeaders)
-      .map { cb => MuxFramer.Header.decodeFrameSize(cb) }
+    val remoteMaxFrameSize = Handshake
+      .valueOf(MuxFramer.Header.KeyBuf, peerHeaders)
+      .map { cb =>
+        MuxFramer.Header.decodeFrameSize(cb)
+      }
+
+    // unused for now
+    val encryptLevel = Handshake.valueOf(OpportunisticTls.Header.KeyBuf, peerHeaders) match {
+      case Some(buf) => OpportunisticTls.Header.decodeLevel(buf)
+      case None => OpportunisticTls.Off
+    }
+
     // Decorate the transport with the MuxFramer. We need to handle the
     // cross product of local and remote configuration. The idea is that
     // both clients and servers can specify the maximum frame size they
@@ -143,11 +143,11 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
     val framerStats = statsReceiver.scope("framer")
     (maxFrameSize, remoteMaxFrameSize) match {
       // The remote peer has suggested a max frame size less than the
-      // sentinal value. We need to configure the framer to fragment.
-      case (_, s@Some(remote)) if remote < Int.MaxValue =>
+      // sentinel value. We need to configure the framer to fragment.
+      case (_, s @ Some(remote)) if remote < Int.MaxValue =>
         MuxFramer(trans, s, framerStats)
       // The local instance has requested a max frame size less than the
-      // sentinal value. We need to be prepared for the remote to send
+      // sentinel value. We need to be prepared for the remote to send
       // fragments.
       case (local, _) if local.inBytes < Int.MaxValue =>
         MuxFramer(trans, None, framerStats)
@@ -172,9 +172,11 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
       tracingFilter andThen next
   }
 
-  private[finagle] class ClientProtoTracing extends ProtoTracing("clnt", StackClient.Role.protoTracing)
+  private[finagle] class ClientProtoTracing
+      extends ProtoTracing("clnt", StackClient.Role.protoTracing)
 
   object Client {
+
     /** Prepends bound residual paths to outbound Mux requests's destinations. */
     private object MuxBindingFactory extends BindingFactory.Module[mux.Request, mux.Response] {
       protected[this] def boundPathFilter(residual: Path) =
@@ -184,8 +186,7 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
     }
 
     private val params: Stack.Params = StackClient.defaultParams +
-      ProtocolLibrary("mux") +
-      Timer(Netty4HashedWheelTimer)
+      ProtocolLibrary("mux")
 
     private val stack: Stack[ServiceFactory[mux.Request, mux.Response]] = StackClient.newStack
       .replace(StackClient.Role.pool, SingletonPool.module[mux.Request, mux.Response])
@@ -199,17 +200,22 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
      * @param maxFrameSize the maximum mux fragment size the client is willing to
      * receive from a server.
      */
-    private def headers(maxFrameSize: StorageUnit): Handshake.Headers = Seq(
-      MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(
-        maxFrameSize.inBytes.toInt)
-    )
+    private def headers(maxFrameSize: StorageUnit): Handshake.Headers = {
+      val muxFrameHeader =
+        MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(maxFrameSize.inBytes.toInt)
+      if (param.MuxImpl.tlsHeaders) {
+        // this is off for now, but will be different in the future if opportunistic
+        // tls is configured.
+        Seq(muxFrameHeader, OpportunisticTls.Header.KeyBuf -> OpportunisticTls.Off.buf)
+      } else Seq(muxFrameHeader)
+    }
   }
 
   case class Client(
-      stack: Stack[ServiceFactory[mux.Request, mux.Response]] = Client.stack,
-      params: Stack.Params = Client.params)
-    extends StdStackClient[mux.Request, mux.Response, Client]
-    with WithDefaultLoadBalancer[Client] {
+    stack: Stack[ServiceFactory[mux.Request, mux.Response]] = Client.stack,
+    params: Stack.Params = Client.params
+  ) extends StdStackClient[mux.Request, mux.Response, Client]
+      with WithDefaultLoadBalancer[Client] {
 
     protected def copy1(
       stack: Stack[ServiceFactory[mux.Request, mux.Response]] = this.stack,
@@ -236,18 +242,13 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
         trans = transport,
         version = LatestVersion,
         headers = Client.headers(maxFrameSize),
-        negotiate = negotiate(maxFrameSize, statsReceiver))
+        negotiate = negotiate(maxFrameSize, statsReceiver)
+      )
 
-      val statsTrans = new StatsTransport(
-        negotiatedTrans,
-        excRecorder,
-        statsReceiver.scope("transport"))
+      val statsTrans =
+        new StatsTransport(negotiatedTrans, excRecorder, statsReceiver.scope("transport"))
 
-      val session = new mux.ClientSession(
-        statsTrans,
-        detectorConfig,
-        name,
-        statsReceiver)
+      val session = new mux.ClientSession(statsTrans, detectorConfig, name, statsReceiver)
 
       mux.ClientDispatcher.newRequestResponse(session)
     }
@@ -261,7 +262,8 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
   def newClient(dest: Name, label: String): ServiceFactory[mux.Request, mux.Response] =
     client.newClient(dest, label)
 
-  private[finagle] class ServerProtoTracing extends ProtoTracing("srv", StackServer.Role.protoTracing)
+  private[finagle] class ServerProtoTracing
+      extends ProtoTracing("srv", StackServer.Role.protoTracing)
 
   object Server {
     private val stack: Stack[ServiceFactory[mux.Request, mux.Response]] = StackServer.newStack
@@ -270,8 +272,7 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
       .prepend(PayloadSizeFilter.module(_.body.length, _.body.length))
 
     private val params: Stack.Params = StackServer.defaultParams +
-      ProtocolLibrary("mux") +
-      Timer(Netty4HashedWheelTimer)
+      ProtocolLibrary("mux")
 
     /**
      * Returns the headers that a server sends to a client.
@@ -286,15 +287,20 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
       clientHeaders: Handshake.Headers,
       maxFrameSize: StorageUnit
     ): Handshake.Headers = {
-      Seq(MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(
-        maxFrameSize.inBytes.toInt))
+      val muxFrameHeader =
+        MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(maxFrameSize.inBytes.toInt)
+      if (param.MuxImpl.tlsHeaders) {
+        // this is off for now, but will be different in the future if opportunistic
+        // tls is configured.
+        Seq(muxFrameHeader, OpportunisticTls.Header.KeyBuf -> OpportunisticTls.Off.buf)
+      } else Seq(muxFrameHeader)
     }
   }
 
   case class Server(
-      stack: Stack[ServiceFactory[mux.Request, mux.Response]] = Server.stack,
-      params: Stack.Params = Server.params)
-    extends StdStackServer[mux.Request, mux.Response, Server] {
+    stack: Stack[ServiceFactory[mux.Request, mux.Response]] = Server.stack,
+    params: Stack.Params = Server.params
+  ) extends StdStackServer[mux.Request, mux.Response, Server] {
 
     protected def copy1(
       stack: Stack[ServiceFactory[mux.Request, mux.Response]] = this.stack,
@@ -322,19 +328,13 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
         trans = transport,
         version = LatestVersion,
         headers = Server.headers(_, maxFrameSize),
-        negotiate = negotiate(maxFrameSize, statsReceiver))
+        negotiate = negotiate(maxFrameSize, statsReceiver)
+      )
 
-      val statsTrans = new StatsTransport(
-        negotiatedTrans,
-        excRecorder,
-        statsReceiver.scope("transport"))
+      val statsTrans =
+        new StatsTransport(negotiatedTrans, excRecorder, statsReceiver.scope("transport"))
 
-      mux.ServerDispatcher.newRequestResponse(
-        statsTrans,
-        service,
-        lessor,
-        tracer,
-        statsReceiver)
+      mux.ServerDispatcher.newRequestResponse(statsTrans, service, lessor, tracer, statsReceiver)
     }
   }
 

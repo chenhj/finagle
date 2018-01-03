@@ -4,10 +4,11 @@ import com.twitter.app.GlobalFlag
 import scala.collection.{Map, mutable}
 import scala.util.matching.Regex
 
-object format extends GlobalFlag[String](
-  "commonsmetrics",
-  "Format style for metric names (ostrich|commonsmetrics|commonsstats)"
-) {
+object format
+    extends GlobalFlag[String](
+      "commonsmetrics",
+      "Format style for metric names (ostrich|commonsmetrics|commonsstats)"
+    ) {
   private[stats] val Ostrich = "ostrich"
   private[stats] val CommonsMetrics = "commonsmetrics"
   private[stats] val CommonsStats = "commonsstats"
@@ -20,14 +21,16 @@ object format extends GlobalFlag[String](
  * only the `count=0` is exported. When `true`, all of the details
  * will be exported.
  */
-object includeEmptyHistograms extends GlobalFlag[Boolean](
-    false,
-    "Include full histogram details when there are no data points")
+object includeEmptyHistograms
+    extends GlobalFlag[Boolean](
+      false,
+      "Include full histogram details when there are no data points"
+    )
 
 /**
  * Allows for customization of how stat names get formatted.
  */
-private[stats] sealed trait StatsFormatter {
+private[finagle] sealed trait StatsFormatter {
 
   def apply(values: SampledValues): Map[String, Number] = {
     val results = new mutable.HashMap[String, Number]()
@@ -35,20 +38,21 @@ private[stats] sealed trait StatsFormatter {
     results ++= values.counters
 
     val includeEmpty = includeEmptyHistograms()
-    values.histograms.foreach { case (name, snapshot) =>
-      val count = snapshot.count
-      results += histoName(name, "count") -> count
-      if (count > 0 || includeEmpty) {
-        results += histoName(name, "sum") -> snapshot.sum
-        results += histoName(name, labelAverage) -> snapshot.avg
-        results += histoName(name, labelMin) -> snapshot.min
-        results += histoName(name, labelMax) -> snapshot.max
+    values.histograms.foreach {
+      case (name, snapshot) =>
+        val count = snapshot.count
+        results += histoName(name, "count") -> count
+        if (count > 0 || includeEmpty) {
+          results += histoName(name, "sum") -> snapshot.sum
+          results += histoName(name, labelAverage) -> snapshot.average
+          results += histoName(name, labelMin) -> snapshot.min
+          results += histoName(name, labelMax) -> snapshot.max
 
-        for (p <- snapshot.percentiles) {
-          val percentileName = histoName(name, labelPercentile(p.getQuantile))
-          results += percentileName -> p.getValue
+          for (p <- snapshot.percentiles) {
+            val percentileName = histoName(name, labelPercentile(p.quantile))
+            results += percentileName -> p.value
+          }
         }
-      }
     }
     results
   }
@@ -75,7 +79,7 @@ private[stats] sealed trait StatsFormatter {
   protected def labelAverage: String
 }
 
-private[stats] object StatsFormatter {
+private[finagle] object StatsFormatter {
 
   /**
    * Uses the global flag, [[format]], to select the formatter used.

@@ -1,9 +1,12 @@
 package com.twitter.finagle.netty4.proxy
 
-import com.twitter.finagle.{ChannelClosedException, ConnectionFailedException, Failure}
+import com.twitter.finagle.{ChannelClosedException, ProxyConnectException}
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.client.Transporter.Credentials
-import com.twitter.finagle.netty4.channel.{BufferingChannelOutboundHandler, ConnectPromiseDelayListeners}
+import com.twitter.finagle.netty4.channel.{
+  BufferingChannelOutboundHandler,
+  ConnectPromiseDelayListeners
+}
 import com.twitter.util.Base64StringEncoder
 import io.netty.channel._
 import io.netty.handler.codec.http._
@@ -29,7 +32,7 @@ import java.net.SocketAddress
  * @note This mixes in a [[BufferingChannelOutboundHandler]] so we can protect ourselves from
  *       channel handlers that write on `channelAdded` or `channelActive`.
  *
- * [1]: http://www.web-cache.com/Writings/Internet-Drafts/draft-luotonen-web-proxy-tunneling-01.txt
+ * [1]: https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
  * [2]: http://wiki.squid-cache.org/Features/HTTPS
  * [3]: https://github.com/netty/netty/blob/4.1/handler-proxy/src/main/java/io/netty/handler/proxy/HttpProxyHandler.java
  *
@@ -38,12 +41,13 @@ import java.net.SocketAddress
  * @param credentialsOption optional credentials for a proxy server
  */
 private[netty4] class HttpProxyConnectHandler(
-    host: String,
-    credentialsOption: Option[Transporter.Credentials],
-    httpClientCodec: ChannelHandler = new HttpClientCodec()) // exposed for testing
-  extends ChannelDuplexHandler
-  with BufferingChannelOutboundHandler
-  with ConnectPromiseDelayListeners { self =>
+  host: String,
+  credentialsOption: Option[Transporter.Credentials],
+  httpClientCodec: ChannelHandler = new HttpClientCodec()
+) // exposed for testing
+    extends ChannelDuplexHandler
+    with BufferingChannelOutboundHandler
+    with ConnectPromiseDelayListeners { self =>
 
   private[this] final def httpCodecKey = "httpProxyClientCodec"
 
@@ -85,8 +89,8 @@ private[netty4] class HttpProxyConnectHandler(
           // Create new connect HTTP proxy connect request.
           val req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.CONNECT, host)
           req.headers().set(HttpHeaderNames.HOST, host)
-          credentialsOption.foreach(c =>
-            req.headers().add(HttpHeaderNames.PROXY_AUTHORIZATION, proxyAuthorizationHeader(c))
+          credentialsOption.foreach(
+            c => req.headers().add(HttpHeaderNames.PROXY_AUTHORIZATION, proxyAuthorizationHeader(c))
           )
 
           ctx.writeAndFlush(req)
@@ -132,7 +136,7 @@ private[netty4] class HttpProxyConnectHandler(
   override def exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable): Unit = {
     fail(ctx, cause)
     ctx.fireExceptionCaught(cause) // we don't call super.exceptionCaught since we've already filed
-                                   // both connect promise and pending writes in `fail`
+    // both connect promise and pending writes in `fail`
     ctx.close() // close a channel since we've failed to perform an HTTP proxy handshake
   }
 
@@ -149,13 +153,12 @@ private[netty4] class HttpProxyConnectHandler(
       ctx.pipeline().remove(self) // drains pending writes when removed
 
       connectPromise.trySuccess()
-      // We don't release `req` since by specs, we don't expect any payload sent back from a
-      // a web proxy server in a successful case.
     } else {
-      val failure = new ConnectionFailedException(
-        Failure(s"Unexpected status returned from an HTTP proxy server: $proxyResponseStatus."),
-        ctx.channel().remoteAddress()
-      )
+      val failure =
+        new ProxyConnectException(
+          s"Unexpected status returned from an HTTP proxy server: $proxyResponseStatus.",
+          ctx.channel().remoteAddress()
+        )
 
       fail(ctx, failure)
       ctx.close()

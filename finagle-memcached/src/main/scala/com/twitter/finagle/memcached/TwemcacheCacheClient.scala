@@ -11,6 +11,7 @@ import scala.collection.breakOut
 
 // Client interface supporting twemcache commands
 trait TwemcacheClient extends Client {
+
   /**
    * Get a set of keys from the server, together with a "version"
    * token.
@@ -57,29 +58,32 @@ trait TwemcacheClient extends Client {
 trait TwemcacheConnectedClient extends TwemcacheClient { self: ConnectedClient =>
   def getvResult(keys: Iterable[String]): Future[GetsResult] = {
     try {
-      if (keys==null) throw new IllegalArgumentException("Invalid keys: keys cannot be null")
-      val bufs =  keys.map { Buf.Utf8(_) }(breakOut)
+      if (keys == null) throw new IllegalArgumentException("Invalid keys: keys cannot be null")
+      val bufs = keys.map { Buf.Utf8(_) }(breakOut)
       rawGet(Getv(bufs)).map { GetsResult(_) } // map to GetsResult as the response format are the same
-    }  catch {
-      case t: IllegalArgumentException => Future.exception(new ClientError(t.getMessage + " For keys: " + keys))
+    } catch {
+      case t: IllegalArgumentException =>
+        Future.exception(new ClientError(t.getMessage + " For keys: " + keys))
     }
   }
 
   def upsert(key: String, flags: Int, expiry: Time, value: Buf, version: Buf): Future[JBoolean] = {
     try {
       service(Upsert(Buf.Utf8(key), flags, expiry, value, version)).map {
-        case Stored   => true
-        case Exists   => false
+        case Stored => true
+        case Exists => false
         case Error(e) => throw e
-        case _        => throw new IllegalStateException
+        case _ => throw new IllegalStateException
       }
     } catch {
-      case t: IllegalArgumentException => Future.exception(new ClientError(t.getMessage + " For key: " + key))
+      case t: IllegalArgumentException =>
+        Future.exception(new ClientError(t.getMessage + " For key: " + key))
     }
   }
 }
 
 object TwemcacheClient {
+
   /**
    * Construct a twemcache client from a single Service, which supports both memcache and twemcache command
    */
@@ -89,31 +93,33 @@ object TwemcacheClient {
 }
 
 /**
- * Twemcache commands implemenation for a partitioned client.
- * This trait can only be mixed into a ParitionedClient that is delegating twemcache compatible clients.
+ * Twemcache commands implementation for a partitioned client.
+ * This trait can only be mixed into a PartitionedClient that is delegating twemcache compatible clients.
  */
 trait TwemcachePartitionedClient extends TwemcacheClient { self: PartitionedClient =>
 
-  // For now we requires the ParitionedClient must be delegating TwemcacheClient.
-  // Refactory is on the way to re-archytect the partitioned client
-  protected[memcached] def twemcacheClientOf(key: String): TwemcacheClient = clientOf(key).asInstanceOf[TwemcacheClient]
+  // For now we require the PartitionedClient must be delegating TwemcacheClient.
+  protected[memcached] def twemcacheClientOf(key: String): TwemcacheClient =
+    clientOf(key).asInstanceOf[TwemcacheClient]
 
-  def getvResult(keys: Iterable[String]) = {
+  def getvResult(keys: Iterable[String]): Future[GetsResult] = {
     if (keys.nonEmpty) {
       withKeysGroupedByClient(keys) {
         _.getvResult(_)
-      }.map { GetResult.merged(_) }
+      }.map { GetResult.merged }
     } else {
       Future.value(GetsResult(GetResult()))
     }
   }
 
-  def upsert(key: String, flags: Int, expiry: Time, value: Buf, version: Buf) =
+  def upsert(key: String, flags: Int, expiry: Time, value: Buf, version: Buf): Future[JBoolean] =
     twemcacheClientOf(key).upsert(key, flags, expiry, value, version)
 
   private[this] def withKeysGroupedByClient[A](
-      keys: Iterable[String])(f: (TwemcacheClient, Iterable[String]) => Future[A]
-      ): Future[Seq[A]] = {
+    keys: Iterable[String]
+  )(
+    f: (TwemcacheClient, Iterable[String]) => Future[A]
+  ): Future[Seq[A]] = {
     Future.collect(
       keys.groupBy(twemcacheClientOf).map(Function.tupled(f))(breakOut)
     )

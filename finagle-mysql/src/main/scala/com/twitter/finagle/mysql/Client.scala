@@ -5,16 +5,30 @@ import com.twitter.finagle.{ClientConnection, ServiceFactory, ServiceProxy}
 import com.twitter.util._
 
 object Client {
+
+  /**
+   * Creates a new Client based on a ServiceFactory.
+   *
+   * @note the returned `Client` will *not* include support for unsigned integer types.
+   */
+  @deprecated("Use the three argument constructor instead.", "2017-08-11")
+  def apply(
+    factory: ServiceFactory[Request, Result],
+    statsReceiver: StatsReceiver = NullStatsReceiver
+  ): Client with Transactions with Cursors = apply(factory, statsReceiver, false)
+
   /**
    * Creates a new Client based on a ServiceFactory.
    */
   def apply(
     factory: ServiceFactory[Request, Result],
-    statsReceiver: StatsReceiver = NullStatsReceiver
-  ): Client with Transactions with Cursors = new StdClient(factory, statsReceiver)
+    statsReceiver: StatsReceiver,
+    supportUnsigned: Boolean
+  ): Client with Transactions with Cursors = new StdClient(factory, supportUnsigned, statsReceiver)
 }
 
 trait Client extends Closable {
+
   /**
    * Returns the result of executing the `sql` query on the server.
    */
@@ -46,6 +60,7 @@ trait Client extends Closable {
 }
 
 trait Transactions {
+
   /**
    * Execute `f` in a transaction.
    *
@@ -61,15 +76,39 @@ trait Transactions {
    *     } yield response
    *   }
    * }}}
-    * @note we use a ServiceFactory that returns the same Service repeatedly to the client. This is
+   * @note we use a ServiceFactory that returns the same Service repeatedly to the client. This is
    * to assure that a new MySQL connection (i.e. Service) from the connection pool (i.e.,
    * ServiceFactory) will be used for each new transaction. Only upon completion of the transaction
    * is the connection returned to the pool for re-use.
    */
   def transaction[T](f: Client => Future[T]): Future[T]
+
+  /**
+   * Execute `f` in a transaction using the given Isolation Level for this transaction only.
+   * This Isolation Level overrides the session and global database settings for the transaction.
+   *
+   * If `f` throws an exception, the transaction is rolled back. Otherwise, the transaction is
+   * committed.
+   *
+   * @example {{{
+   *   client.transaction[Foo](IsolationLevel.RepeatableRead) { c =>
+   *    for {
+   *       r0 <- c.query(q0)
+   *       r1 <- c.query(q1)
+   *       response: Foo <- buildResponse(r1, r2)
+   *     } yield response
+   *   }
+   * }}}
+   * @note we use a ServiceFactory that returns the same Service repeatedly to the client. This is
+   * to assure that a new MySQL connection (i.e. Service) from the connection pool (i.e.,
+   * ServiceFactory) will be used for each new transaction. Only upon completion of the transaction
+   * is the connection returned to the pool for re-use.
+   */
+  def transactionWithIsolation[T](isolationLevel: IsolationLevel)(f: Client => Future[T]): Future[T]
 }
 
 trait Cursors {
+
   /**
    * Create a CursoredStatement with the given parameterized sql query.
    * The returned cursored statement can be reused and applied with varying
@@ -82,8 +121,13 @@ trait Cursors {
   def cursor(sql: String): CursoredStatement
 }
 
-private class StdClient(factory: ServiceFactory[Request, Result], statsReceiver: StatsReceiver)
-  extends Client with Transactions with Cursors {
+private class StdClient(
+  factory: ServiceFactory[Request, Result],
+  supportUnsigned: Boolean,
+  statsReceiver: StatsReceiver
+) extends Client
+    with Transactions
+    with Cursors {
 
   private[this] val service = factory.toService
 
@@ -102,8 +146,13 @@ private class StdClient(factory: ServiceFactory[Request, Result], statsReceiver:
     def apply(ps: Parameter*): Future[Result] = factory() flatMap { svc =>
       svc(PrepareRequest(sql)).flatMap {
         case ok: PrepareOK => svc(ExecuteRequest(ok.id, ps.toIndexedSeq))
-        case r => Future.exception(new Exception("Unexpected result %s when preparing %s"
-          .format(r, sql)))
+        case r =>
+          Future.exception(
+            new Exception(
+              "Unexpected result %s when preparing %s"
+                .format(r, sql)
+            )
+          )
       } ensure {
         svc.close()
       }
@@ -112,17 +161,32 @@ private class StdClient(factory: ServiceFactory[Request, Result], statsReceiver:
 
   def cursor(sql: String): CursoredStatement = {
     new CursoredStatement {
-      override def apply[T](rowsPerFetch: Int, params: Parameter*)(f: (Row) => T): Future[CursorResult[T]] = {
+      override def apply[T](rowsPerFetch: Int, params: Parameter*)(
+        f: (Row) => T
+      ): Future[CursorResult[T]] = {
         assert(rowsPerFetch > 0, "rowsPerFetch must be positive")
 
         factory().map { svc =>
-          new StdCursorResult[T](cursorStats, svc, sql, rowsPerFetch, params, f)
+          new StdCursorResult[T](cursorStats, svc, sql, rowsPerFetch, params, f, supportUnsigned)
         }
       }
     }
   }
 
+  def transactionWithIsolation[T](
+    isolationLevel: IsolationLevel
+  )(f: Client => Future[T]): Future[T] = {
+    transact(Some(isolationLevel), f)
+  }
+
   def transaction[T](f: Client => Future[T]): Future[T] = {
+    transact(None, f)
+  }
+
+  private[this] def transact[T](
+    isolationLevel: Option[IsolationLevel],
+    f: Client => Future[T]
+  ): Future[T] = {
     val singleton = new ServiceFactory[Request, Result] {
       val svc = factory()
       // Because the `singleton` is used in the context of a `FactoryToService` we override
@@ -136,9 +200,12 @@ private class StdClient(factory: ServiceFactory[Request, Result], statsReceiver:
       def apply(conn: ClientConnection) = proxiedService
       def close(deadline: Time): Future[Unit] = svc.flatMap(_.close(deadline))
     }
-
-    val client = Client(singleton, statsReceiver)
+    val client = Client(singleton, statsReceiver, supportUnsigned)
     val transaction = for {
+      _ <- isolationLevel match {
+        case Some(iso) => client.query(s"SET TRANSACTION ISOLATION LEVEL ${iso.name}")
+        case None => Future.Done
+      }
       _ <- client.query("START TRANSACTION")
       result <- f(client)
       _ <- client.query("COMMIT")

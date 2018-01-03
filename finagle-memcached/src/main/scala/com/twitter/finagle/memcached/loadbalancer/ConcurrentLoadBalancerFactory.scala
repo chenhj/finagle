@@ -1,6 +1,8 @@
 package com.twitter.finagle.memcached.loadbalancer
 
+import com.twitter.finagle.memcached.Toggles
 import com.twitter.finagle.loadbalancer.LoadBalancerFactory
+import com.twitter.finagle.server.ServerInfo
 import com.twitter.finagle.{Addr, Address, Stack, ServiceFactory, Stackable}
 
 /**
@@ -14,11 +16,17 @@ import com.twitter.finagle.{Addr, Address, Stack, ServiceFactory, Stackable}
 object ConcurrentLoadBalancerFactory {
   private val ReplicaKey = "concurrent_lb_replica"
 
+  private[this] val UseTwoConnections =
+    Toggles("com.twitter.finagle.memcached.UseTwoConnections")(ServerInfo().id.hashCode)
+
+  private[this] val numConnections: Int =
+    if (UseTwoConnections) 2
+    else 4
+
   // package private for testing
   private[finagle] def replicate(num: Int): Address => Set[Address] = {
     case Address.Inet(ia, metadata) =>
-      for (i: Int <- (0 until num).toSet) yield
-        Address.Inet(ia, metadata + (ReplicaKey -> i))
+      for (i: Int <- (0 until num).toSet) yield Address.Inet(ia, metadata + (ReplicaKey -> i))
     case addr => Set(addr)
   }
 
@@ -30,7 +38,7 @@ object ConcurrentLoadBalancerFactory {
     def mk(): (Param, Stack.Param[Param]) = (this, Param.param)
   }
   object Param {
-    implicit val param = Stack.Param(Param(4))
+    implicit val param = Stack.Param(Param(numConnections))
   }
 
   private[finagle] def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
@@ -42,7 +50,7 @@ object ConcurrentLoadBalancerFactory {
         val Param(numConnections) = params[Param]
         val LoadBalancerFactory.Dest(dest) = params[LoadBalancerFactory.Dest]
         val newDest = dest.map {
-          case bound@Addr.Bound(set, _) =>
+          case bound @ Addr.Bound(set, _) =>
             bound.copy(addrs = set.flatMap(replicate(numConnections)))
           case addr => addr
         }

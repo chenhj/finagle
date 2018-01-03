@@ -1,8 +1,7 @@
 package com.twitter.finagle.http
 
-import com.twitter.io.{Buf, Reader => BufReader, Writer => BufWriter}
-import com.twitter.finagle.netty3.{BufChannelBuffer, ChannelBufferBuf}
-import com.twitter.finagle.http.netty.Bijections
+import com.twitter.io.{Buf, BufInputStream, Reader => BufReader, Writer => BufWriter}
+import com.twitter.finagle.netty3.ChannelBufferBuf
 import com.twitter.util.{Closable, Duration, Future}
 import java.io._
 import java.util.{Iterator => JIterator}
@@ -10,11 +9,9 @@ import java.nio.charset.Charset
 import java.util.{Date, Locale, TimeZone}
 import org.apache.commons.lang.StringUtils
 import org.apache.commons.lang.time.FastDateFormat
-import org.jboss.netty.buffer.{
-  ChannelBuffer, ChannelBufferInputStream, ChannelBufferOutputStream, ChannelBuffers}
-import org.jboss.netty.handler.codec.http.{HttpHeaders, HttpMessage}
+import org.jboss.netty.buffer.{ChannelBufferOutputStream, ChannelBuffers}
+import org.jboss.netty.handler.codec.http.DefaultHttpHeaders
 import scala.collection.JavaConverters._
-import Bijections._
 
 /**
  * Rich Message
@@ -24,20 +21,24 @@ import Bijections._
  */
 abstract class Message {
 
-  protected def httpMessage: HttpMessage
-  private[this] val readerWriter = BufReader.writable()
+  private[this] var _content: Buf = Buf.Empty
+  private[this] var _version: Version = Version.Http11
+  private[this] var _chunked: Boolean = false
+
+  // We continue to use the Netty 3 type internally to get its validation logic
+  private[this] lazy val _headerMap: HeaderMap = new Netty3HeaderMap(new DefaultHttpHeaders())
 
   /**
    * A read-only handle to the internal stream of bytes, representing the
    * message body. See [[com.twitter.io.Reader]] for more information.
    **/
-  def reader: BufReader = readerWriter
+  def reader: BufReader
 
   /**
    * A write-only handle to the internal stream of bytes, representing the
    * message body. See [[com.twitter.io.Writer]] for more information.
    **/
-  def writer: BufWriter with Closable = readerWriter
+  def writer: BufWriter with Closable
 
   def isRequest: Boolean
   def isResponse = !isRequest
@@ -47,7 +48,7 @@ abstract class Message {
    *
    * If this message is chunked, the resulting `Buf` will always be empty.
    */
-  def content: Buf = ChannelBufferBuf.Owned(getContent())
+  def content: Buf = _content
 
   /**
    * Set the content of this `Message`.
@@ -58,7 +59,11 @@ abstract class Message {
    * @see [[content(Buf)]] for Java users
    */
   @throws[IllegalStateException]
-  def content_=(content: Buf): Unit = { setContent(BufChannelBuffer(content)) }
+  def content_=(content: Buf): Unit = {
+    if (!content.isEmpty && isChunked)
+      throw new IllegalStateException("Cannot set content on Chunked message")
+    _content = content
+  }
 
   /**
    * Set the content of this `Message`.
@@ -75,13 +80,13 @@ abstract class Message {
   }
 
   /** Get the HTTP version */
-  def version: Version = from(httpMessage.getProtocolVersion())
+  def version: Version = _version
 
   /** Set the HTTP version
    *
    * @see [[version(Version)]] for Java users
    */
-  def version_=(version: Version): Unit = httpMessage.setProtocolVersion(from(version))
+  def version_=(version: Version): Unit = _version = version
 
   /** Set the HTTP version
    *
@@ -92,7 +97,23 @@ abstract class Message {
     this
   }
 
-  lazy val headerMap: HeaderMap = new Netty3HeaderMap(httpMessage.headers)
+  def isChunked: Boolean = _chunked
+
+  /**
+   * Manipulate the `Message` content mode.
+   *
+   * If `chunked` is `true`, any existing content will be discarded and further attempts
+   * to manipulate the synchronous content will result in an `IllegalStateException`.
+   *
+   * If `chunked` is `false`, the synchronous content methods will become available
+   * and the `Reader`/`Writer` of the message will be ignored by Finagle.
+   */
+  def setChunked(chunked: Boolean): Unit = {
+    _chunked = chunked
+    if (chunked) clearContent()
+  }
+
+  def headerMap: HeaderMap = _headerMap
 
   /**
    * Cookies. In a request, this uses the Cookie headers.
@@ -118,10 +139,12 @@ abstract class Message {
   def accept: Seq[String] =
     headerMap.get(Fields.Accept) match {
       case Some(s) => s.split(",").map(_.trim).filter(_.nonEmpty)
-      case None    => Seq()
+      case None => Seq()
     }
+
   /** Set Accept header */
   def accept_=(value: String): Unit = headerMap.set(Fields.Accept, value)
+
   /** Set Accept header with list of values */
   def accept_=(values: Iterable[String]): Unit = accept = values.mkString(", ")
 
@@ -129,14 +152,16 @@ abstract class Message {
   def acceptMediaTypes: Seq[String] =
     accept.map {
       _.split(";", 2).headOption
-         .map(_.trim.toLowerCase) // media types are case-insensitive
-         .filter(_.nonEmpty)      // skip blanks
+        .map(_.trim.toLowerCase) // media types are case-insensitive
+        .filter(_.nonEmpty) // skip blanks
     }.flatten
 
   /** Allow header */
   def allow: Option[String] = headerMap.get(Fields.Allow)
+
   /** Set Authorization header */
   def allow_=(value: String): Unit = headerMap.set(Fields.Allow, value)
+
   /** Set Authorization header */
   def allow_=(values: Iterable[Method]): Unit = {
     allow = values.mkString(",").toUpperCase
@@ -144,13 +169,16 @@ abstract class Message {
 
   /** Get Authorization header */
   def authorization: Option[String] = headerMap.get(Fields.Authorization)
+
   /** Set Authorization header */
   def authorization_=(value: String): Unit = headerMap.set(Fields.Authorization, value)
 
   /** Get Cache-Control header */
   def cacheControl: Option[String] = headerMap.get(Fields.CacheControl)
+
   /** Set Cache-Control header */
   def cacheControl_=(value: String): Unit = headerMap.set(Fields.CacheControl, value)
+
   /** Set Cache-Control header with a max-age (and must-revalidate). */
   def cacheControl_=(maxAge: Duration): Unit =
     cacheControl = "max-age=" + maxAge.inSeconds.toString + ", must-revalidate"
@@ -170,6 +198,7 @@ abstract class Message {
     }
     None
   }
+
   /** Set charset in Content-Type header.  This does not change the content. */
   def charset_=(value: String): Unit = {
     val contentType = this.contentType.getOrElse("")
@@ -185,13 +214,13 @@ abstract class Message {
       builder.append(";charset=")
       builder.append(value)
       // Copy other parameters
-      1.to(parts.length - 1) foreach {  i =>
+      1.to(parts.length - 1) foreach { i =>
         builder.append(";")
         builder.append(parts(i))
       }
     } else {
       // Replace charset= parameter(s)
-      1.to(parts.length - 1) foreach {  i =>
+      1.to(parts.length - 1) foreach { i =>
         val part = parts(i)
         if (part.trim.startsWith("charset=")) {
           builder.append(";charset=")
@@ -224,7 +253,7 @@ abstract class Message {
       case None => default
     }
   }
-  
+
   /**
    * Set Content-Length header.  Normally, this is automatically set by the
    * Codec, but this method allows you to override that.
@@ -239,7 +268,7 @@ abstract class Message {
    * Codec, but this method allows you to override that.
    *
    * @see [[contentLength_=(Long)]] for Scala users.
-    */
+   */
   final def contentLength(value: Long): this.type = {
     this.contentLength = value
     this
@@ -247,18 +276,23 @@ abstract class Message {
 
   /** Get Content-Type header */
   def contentType: Option[String] = headerMap.get(Fields.ContentType)
+
   /** Set Content-Type header */
   def contentType_=(value: String): Unit = headerMap.set(Fields.ContentType, value)
+
   /** Set Content-Type header by media-type and charset */
   def setContentType(mediaType: String, charset: String = "utf-8"): Unit =
     headerMap.set(Fields.ContentType, mediaType + ";charset=" + charset)
+
   /** Set Content-Type header to application/json;charset=utf-8 */
   def setContentTypeJson(): Unit = headerMap.set(Fields.ContentType, Message.ContentTypeJson)
 
   /** Get Date header */
   def date: Option[String] = headerMap.get(Fields.Date)
+
   /** Set Date header */
   def date_=(value: String): Unit = headerMap.set(Fields.Date, value)
+
   /** Set Date header by Date */
   def date_=(value: Date): Unit = {
     date = Message.httpDateFormat(value)
@@ -266,8 +300,10 @@ abstract class Message {
 
   /** Get Expires header */
   def expires: Option[String] = headerMap.get(Fields.Expires)
+
   /** Set Expires header */
   def expires_=(value: String): Unit = headerMap.set(Fields.Expires, value)
+
   /** Set Expires header by Date */
   def expires_=(value: Date): Unit = {
     expires = Message.httpDateFormat(value)
@@ -275,13 +311,30 @@ abstract class Message {
 
   /** Get Host header */
   def host: Option[String] = headerMap.get(Fields.Host)
-  /** Set Host header */
+
+  /**
+   * Set Host header
+   *
+   * @see host(String) for Java users
+   */
   def host_=(value: String): Unit = headerMap.set(Fields.Host, value)
+
+  /**
+   * Set the Host header
+   *
+   * @see [[host_=(String)]] for Scala users
+   */
+  final def host(value: String): this.type = {
+    host = value
+    this
+  }
 
   /** Get Last-Modified header */
   def lastModified: Option[String] = headerMap.get(Fields.LastModified)
+
   /** Set Last-Modified header */
   def lastModified_=(value: String): Unit = headerMap.set(Fields.LastModified, value)
+
   /** Set Last-Modified header by Date */
   def lastModified_=(value: Date): Unit = {
     lastModified = Message.httpDateFormat(value)
@@ -289,6 +342,7 @@ abstract class Message {
 
   /** Get Location header */
   def location: Option[String] = headerMap.get(Fields.Location)
+
   /** Set Location header */
   def location_=(value: String): Unit = headerMap.set(Fields.Location, value)
 
@@ -298,7 +352,7 @@ abstract class Message {
       val beforeSemi =
         contentType.indexOf(";") match {
           case -1 => contentType
-          case n  => contentType.substring(0, n)
+          case n => contentType.substring(0, n)
         }
       val mediaType = beforeSemi.trim
       if (mediaType.nonEmpty)
@@ -306,6 +360,7 @@ abstract class Message {
       else
         None
     }
+
   /**
    * Set media-type in Content-Type header.  Charset and parameter values are
    * preserved, though may not be appropriate for the new media type.
@@ -326,13 +381,16 @@ abstract class Message {
 
   /** Get Referer [sic] header */
   def referer: Option[String] = headerMap.get(Fields.Referer)
+
   /** Set Referer [sic] header */
   def referer_=(value: String): Unit = headerMap.set(Fields.Referer, value)
 
   /** Get Retry-After header */
   def retryAfter: Option[String] = headerMap.get(Fields.RetryAfter)
+
   /** Set Retry-After header */
   def retryAfter_=(value: String): Unit = headerMap.set(Fields.RetryAfter, value)
+
   /** Set Retry-After header by seconds */
   def retryAfter_=(value: Long): Unit = {
     retryAfter = value.toString
@@ -340,21 +398,25 @@ abstract class Message {
 
   /** Get Server header */
   def server: Option[String] = headerMap.get(Fields.Server)
+
   /** Set Server header */
   def server_=(value: String): Unit = headerMap.set(Fields.Server, value)
 
   /** Get User-Agent header */
   def userAgent: Option[String] = headerMap.get(Fields.UserAgent)
+
   /** Set User-Agent header */
   def userAgent_=(value: String): Unit = headerMap.set(Fields.UserAgent, value)
 
   /** Get WWW-Authenticate header */
   def wwwAuthenticate: Option[String] = headerMap.get(Fields.WwwAuthenticate)
+
   /** Set WWW-Authenticate header */
   def wwwAuthenticate_=(value: String): Unit = headerMap.set(Fields.WwwAuthenticate, value)
 
   /** Get X-Forwarded-For header */
   def xForwardedFor: Option[String] = headerMap.get("X-Forwarded-For")
+
   /** Set X-Forwarded-For header */
   def xForwardedFor_=(value: String): Unit = headerMap.set("X-Forwarded-For", value)
 
@@ -368,7 +430,7 @@ abstract class Message {
     headerMap.get("X-Requested-With").exists { _.toLowerCase.contains("xmlhttprequest") }
 
   /** Get length of content. */
-  def length: Int = getContent.readableBytes
+  final def length: Int = content.length
 
   /** Get length of content. */
   final def getLength(): Int = length
@@ -380,17 +442,15 @@ abstract class Message {
     } catch {
       case _: Throwable => Message.Utf8
     }
-    getContent.toString(encoding)
+    Buf.decodeString(content, encoding)
   }
 
   def getContentString(): String = contentString
 
   /** Set the content as a string. */
   def contentString_=(value: String): Unit = {
-    if (value != "")
-      setContent(BufChannelBuffer(Buf.Utf8(value)))
-    else
-      setContent(ChannelBuffers.EMPTY_BUFFER)
+    if (value == "") clearContent()
+    else content = Buf.Utf8(value)
   }
 
   /** Set the content as a string. */
@@ -402,20 +462,18 @@ abstract class Message {
    */
   def withInputStream[T](f: InputStream => T): T = {
     val inputStream = getInputStream()
-    val result = f(inputStream) // throws
-    inputStream.close()
-    result
+    try f(inputStream)
+    finally inputStream.close()
   }
 
   /**
    * Get InputStream for content.  Caller must close.  (Java interface.  Scala
    * users should use withInputStream.)
    */
-  def getInputStream(): InputStream =
-    new ChannelBufferInputStream(getContent)
+  final def getInputStream(): InputStream = new BufInputStream(content)
 
-  /** Use content as Reader.  (Scala interface.  Java usrs can use getReader().) */
-  def withReader[T](f: Reader => T): T = {
+  /** Use content as Reader.  (Scala interface.  Java users can use getReader().) */
+  final def withReader[T](f: Reader => T): T = {
     withInputStream { inputStream =>
       val reader = new InputStreamReader(inputStream)
       f(reader)
@@ -423,7 +481,7 @@ abstract class Message {
   }
 
   /** Get Reader for content.  (Java interface.  Scala users should use withReader.) */
-  def getReader(): Reader =
+  final def getReader(): Reader =
     new InputStreamReader(getInputStream())
 
   /**
@@ -432,7 +490,7 @@ abstract class Message {
    * An `IllegalStateException` is thrown if this message is chunked.
    */
   @throws(classOf[IllegalStateException])
-  def write(string: String): Unit = write(Buf.Utf8(string))
+  final def write(string: String): Unit = write(Buf.Utf8(string))
 
   /**
    * Append a Buf to content.
@@ -440,12 +498,9 @@ abstract class Message {
    * An `IllegalStateException` is thrown if this message is chunked.
    */
   @throws(classOf[IllegalStateException])
-  def write(buf: Buf): Unit = {
-    val channelBuffer = buf match {
-      case ChannelBufferBuf(channelBuffer) => channelBuffer
-      case _ => BufChannelBuffer(buf)
-    }
-    setContent(ChannelBuffers.wrappedBuffer(getContent(), channelBuffer))
+  final def write(buf: Buf): Unit = {
+    if (!isChunked) content = content.concat(buf)
+    else throw new IllegalStateException("Cannot write buffers to a chunked message!")
   }
 
   /**
@@ -458,7 +513,7 @@ abstract class Message {
    * An `IllegalStateException` is thrown if this message is chunked.
    */
   @throws(classOf[IllegalStateException])
-  def write(bytes: Array[Byte]): Unit = write(Buf.ByteArray.Shared(bytes))
+  final def write(bytes: Array[Byte]): Unit = write(Buf.ByteArray.Shared(bytes))
 
   /**
    * Append content via an OutputStream.
@@ -466,14 +521,15 @@ abstract class Message {
    * An `IllegalStateException` is thrown if this message is chunked.
    */
   @throws(classOf[IllegalStateException])
-  def withOutputStream[T](f: OutputStream => T): T = {
+  final def withOutputStream[T](f: OutputStream => T): T = {
     // Use buffer size of 1024.  Netty default is 256, which seems too small.
     // Netty doubles buffers on resize.
     val outputStream = new ChannelBufferOutputStream(ChannelBuffers.dynamicBuffer(1024))
-    val result = f(outputStream) // throws
-    outputStream.close()
-    write(ChannelBufferBuf.Owned(outputStream.buffer))
-    result
+    try {
+      val result = f(outputStream) // throws
+      write(ChannelBufferBuf.Owned(outputStream.buffer))
+      result
+    } finally outputStream.close()
   }
 
   /**
@@ -482,65 +538,54 @@ abstract class Message {
    * An `IllegalStateException` is thrown if this message is chunked.
    */
   @throws(classOf[IllegalStateException])
-  def withWriter[T](f: Writer => T): T = {
+  final def withWriter[T](f: Writer => T): T = {
+    // withOutputStream will write() to the message
     withOutputStream { outputStream =>
       val writer = new OutputStreamWriter(outputStream, Message.Utf8)
-      val result = f(writer)
-      writer.close()
-      // withOutputStream will write()
-      result
+      try f(writer)
+      finally writer.close()
     }
   }
 
   /** Clear content (set to ""). */
-  def clearContent(): Unit = setContent(ChannelBuffers.EMPTY_BUFFER)
+  final def clearContent(): Unit = content = Buf.Empty
 
   /** End the response stream. */
   def close(): Future[Unit] = writer.close()
 
-  private[http] def isKeepAlive: Boolean = HttpHeaders.isKeepAlive(httpMessage)
+  final def keepAlive(keepAlive: Boolean): this.type = {
+    version match {
+      case Version.Http10 =>
+        if (keepAlive) headerMap.set(Fields.Connection, "keep-alive")
+        else headerMap.remove(Fields.Connection) // HTTP/1.0 defaults to close
 
-  private[this] def headers(): HttpHeaders =
-    httpMessage.headers()
-
-  private[this] def getContent(): ChannelBuffer =
-    httpMessage.getContent()
-
-  @throws[IllegalStateException]
-  private[this] def setContent(content: ChannelBuffer): Unit = {
-    // To preserve netty3 behavior, we only throw an exception if the content is non-empty
-    if (isChunked && content.readable())
-      throw new IllegalStateException("Cannot set non-empty content on chunked message")
-    else httpMessage.setContent(content)
+      case _ =>
+        if (keepAlive) headerMap.remove(Fields.Connection)
+        else headerMap.set(Fields.Connection, "close")
+    }
+    this
   }
 
-  def isChunked: Boolean = httpMessage.isChunked()
-
-  /**
-   * Manipulate the `Message` content mode.
-   *
-   * If `chunked` is `true`, any existing content will be discarded and further attempts
-   * to manipulate the synchronous content will result in an `IllegalStateException`.
-   *
-   * If `chunked` is `false`, the synchronous content methods will become available
-   * and the `Reader`/`Writer` of the message will be ignored by finagle.
-   */
-  def setChunked(chunked: Boolean): Unit =
-    httpMessage.setChunked(chunked)
+  final def keepAlive: Boolean = headerMap.get(Fields.Connection) match {
+    case Some(value) if value.equalsIgnoreCase("close") => false
+    case Some(value) if value.equalsIgnoreCase("keep-alive") => true
+    case _ => version == Version.Http11
+  }
 }
 
-
 object Message {
-  private[http] val Utf8          = Charset.forName("UTF-8")
-  val CharsetUtf8           = "charset=utf-8"
-  val ContentTypeJson       = MediaType.Json + ";" + CharsetUtf8
-  val ContentTypeJsonPatch  = MediaType.JsonPatch + ";" + CharsetUtf8
+  private[http] val Utf8 = Charset.forName("UTF-8")
+  val CharsetUtf8 = "charset=utf-8"
+  val ContentTypeJson = MediaType.Json + ";" + CharsetUtf8
+  val ContentTypeJsonPatch = MediaType.JsonPatch + ";" + CharsetUtf8
   val ContentTypeJavascript = MediaType.Javascript + ";" + CharsetUtf8
-  val ContentTypeWwwForm    = MediaType.WwwForm + ";" + CharsetUtf8
+  val ContentTypeWwwForm = MediaType.WwwForm + ";" + CharsetUtf8
 
-  private val HttpDateFormat = FastDateFormat.getInstance("EEE, dd MMM yyyy HH:mm:ss",
-                                                          TimeZone.getTimeZone("GMT"),
-                                                          Locale.ENGLISH)
+  private val HttpDateFormat = FastDateFormat.getInstance(
+    "EEE, dd MMM yyyy HH:mm:ss",
+    TimeZone.getTimeZone("GMT"),
+    Locale.ENGLISH
+  )
   def httpDateFormat(date: Date): String =
     HttpDateFormat.format(date) + " GMT"
 }

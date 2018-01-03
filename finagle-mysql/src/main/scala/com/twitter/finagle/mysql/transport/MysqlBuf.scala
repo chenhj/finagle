@@ -1,7 +1,7 @@
 package com.twitter.finagle.mysql.transport
 
-import com.twitter.io.{Buf, ByteReader, ByteWriter, ProxyByteReader, ProxyByteWriter}
-import java.nio.charset.{Charset => JCharset, StandardCharsets}
+import com.twitter.io.{Buf, BufByteWriter, ByteReader, ProxyByteReader, ProxyByteWriter}
+import java.nio.charset.{StandardCharsets, Charset => JCharset}
 import scala.collection.mutable.{Buffer => MutableBuffer}
 
 /**
@@ -15,7 +15,7 @@ object MysqlBuf {
 
   def reader(bytes: Array[Byte]): MysqlBufReader = reader(Buf.ByteArray.Owned(bytes))
 
-  def writer(bytes: Array[Byte]): MysqlBufWriter = new MysqlBufWriter(bytes)
+  def writer(bytes: Array[Byte]): MysqlBufWriter = new MysqlBufWriter(BufByteWriter(bytes))
 
   /**
    * Calculates the size required to store a length
@@ -134,10 +134,9 @@ class MysqlBufReader(buf: Buf) extends ProxyByteReader {
   }
 }
 
-
-class MysqlBufWriter(bytes: Array[Byte]) extends ProxyByteWriter {
-
-  protected val writer: ByteWriter = ByteWriter(bytes)
+class MysqlBufWriter(underlying: BufByteWriter)
+    extends ProxyByteWriter(underlying)
+    with BufByteWriter {
 
   /**
    * Writes `b` to the buffer `num` times
@@ -159,19 +158,19 @@ class MysqlBufWriter(bytes: Array[Byte]) extends ProxyByteWriter {
   def writeVariableLong(length: Long): MysqlBufWriter = {
     if (length < 0) throw new IllegalStateException(s"Negative length-encoded integer: $length")
     if (length < 251) {
-       writeByte(length.toInt)
-     } else if (length < 65536) {
-       writeByte(252)
-       writeShortLE(length.toInt)
-     } else if (length < 16777216) {
-       writeByte(253)
-       writeMediumLE(length.toInt)
-     } else {
-       writeByte(254)
-       writeLongLE(length)
-     }
-     this
-   }
+      writeByte(length.toInt)
+    } else if (length < 65536) {
+      writeByte(252)
+      writeShortLE(length.toInt)
+    } else if (length < 16777216) {
+      writeByte(253)
+      writeMediumLE(length.toInt)
+    } else {
+      writeByte(254)
+      writeLongLE(length)
+    }
+    this
+  }
 
   /**
    * Writes a null terminated string onto the buffer encoded as UTF-8
@@ -203,4 +202,6 @@ class MysqlBufWriter(bytes: Array[Byte]) extends ProxyByteWriter {
     writeBytes(bytes)
     this
   }
+
+  def owned(): Buf = underlying.owned()
 }

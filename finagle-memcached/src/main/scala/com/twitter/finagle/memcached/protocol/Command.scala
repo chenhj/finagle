@@ -4,132 +4,71 @@ import com.twitter.io.Buf
 import com.twitter.util.Time
 import scala.collection.immutable
 
-private object KeyValidation {
-  private val MaxKeyLength = 250
-
-  private def tooLong(key: Buf): Boolean = key.length > MaxKeyLength
-
-  private[this] object processor extends Buf.Processor {
-    def apply(byte: Byte): Boolean = !invalidChar(byte)
-
-    private def invalidChar(b: Byte): Boolean =
-      b <= ' ' && (b == '\n' || b == '\u0000' || b == '\r' || b == ' ')
-  }
-
-  /** Return -1 if no invalid bytes */
-  private def invalidByteIndex(key: Buf): Int = key.process(processor)
-
-  private val KeyCheck: Buf => Unit =
-    key => {
-      if (key == null)
-        throw new IllegalArgumentException("Invalid keys: key cannot be null")
-
-      if (tooLong(key))
-        throw new IllegalArgumentException(
-          "Invalid keys: key cannot be longer than %d bytes (%d)".format(MaxKeyLength, key.length))
-
-      val index = invalidByteIndex(key)
-      if (index != -1) {
-        val ch = key.get(index)
-        throw new IllegalArgumentException(
-          "Invalid keys: key cannot have whitespace or control characters: '0x%d'".format(ch))
-      }
-    }
-
-}
-
-/**
- * This trait contains cache command key validation logic.
- * The validation is done by searching each buffer for invalid character defined in
- * Bufs.INVALID_KEY_CHARACTER, during construction of this trait.
- *
- * All cache commands accepting key/keys should mixin this trait.
- */
-trait KeyValidation {
-  import KeyValidation._
-
-  def keys: Seq[Buf]
-
-  {
-    // Validating keys
-    val ks = keys
-    if (ks == null)
-      throw new IllegalArgumentException("Invalid keys: cannot have null for keys")
-
-    ks.foreach(KeyCheck)
-  }
-
-  def badKey(key: Buf): Boolean = {
-    if (key == null) true else {
-      tooLong(key) || invalidByteIndex(key) != -1
-    }
-  }
-}
-
 sealed abstract class Command(val name: String)
 
 private[memcached] object StorageCommand {
   val StorageCommands = immutable.Set[Buf](
-    Buf.Utf8("set"), Buf.Utf8("add"), Buf.Utf8("replace"), Buf.Utf8("append"), Buf.Utf8("prepend"),
-    Buf.Utf8("cas"))
+    Buf.Utf8("set"),
+    Buf.Utf8("add"),
+    Buf.Utf8("replace"),
+    Buf.Utf8("append"),
+    Buf.Utf8("prepend"),
+    Buf.Utf8("cas")
+  )
 }
 
 sealed abstract class StorageCommand(
-    key: Buf,
-    flags: Int,
-    expiry: Time,
-    value: Buf,
-    name: String)
-  extends Command(name)
-  with KeyValidation {
-  def keys: Seq[Buf] = Seq(key)
+  val key: Buf,
+  flags: Int,
+  expiry: Time,
+  value: Buf,
+  name: String
+) extends Command(name) {
+  KeyValidation.checkKey(key)
 }
 
 sealed abstract class NonStorageCommand(name: String) extends Command(name)
 
-sealed abstract class ArithmeticCommand(
-    key: Buf,
-    delta: Long,
-    name: String)
-  extends NonStorageCommand(name)
-  with KeyValidation {
-  def keys: Seq[Buf] = Seq(key)
+sealed abstract class ArithmeticCommand(val key: Buf, delta: Long, name: String)
+    extends NonStorageCommand(name) {
+  KeyValidation.checkKey(key)
 }
 
-sealed abstract class RetrievalCommand(name: String) extends NonStorageCommand(name) with KeyValidation {
+sealed abstract class RetrievalCommand(name: String) extends NonStorageCommand(name) {
   def keys: Seq[Buf]
+  KeyValidation.checkKeys(keys)
 }
 
 // storage commands
-case class Set(key: Buf, flags: Int, expiry: Time, value: Buf)
-  extends StorageCommand(key, flags, expiry, value, "Set")
-case class Add(key: Buf, flags: Int, expiry: Time, value: Buf)
-  extends StorageCommand(key, flags, expiry, value, "Add")
-case class Replace(key: Buf, flags: Int, expiry: Time, value: Buf)
-  extends StorageCommand(key, flags, expiry, value, "Replace")
-case class Append(key: Buf, flags: Int, expiry: Time, value: Buf)
-  extends StorageCommand(key, flags, expiry, value, "Append")
-case class Prepend(key: Buf, flags: Int, expiry: Time, value: Buf)
-  extends StorageCommand(key, flags, expiry, value, "Prepend")
-case class Cas(key: Buf, flags: Int, expiry: Time, value: Buf, casUnique: Buf)
-  extends StorageCommand(key, flags, expiry, value, "Cas")
+case class Set(override val key: Buf, flags: Int, expiry: Time, value: Buf)
+    extends StorageCommand(key, flags, expiry, value, "Set")
+case class Add(override val key: Buf, flags: Int, expiry: Time, value: Buf)
+    extends StorageCommand(key, flags, expiry, value, "Add")
+case class Replace(override val key: Buf, flags: Int, expiry: Time, value: Buf)
+    extends StorageCommand(key, flags, expiry, value, "Replace")
+case class Append(override val key: Buf, flags: Int, expiry: Time, value: Buf)
+    extends StorageCommand(key, flags, expiry, value, "Append")
+case class Prepend(override val key: Buf, flags: Int, expiry: Time, value: Buf)
+    extends StorageCommand(key, flags, expiry, value, "Prepend")
+case class Cas(override val key: Buf, flags: Int, expiry: Time, value: Buf, casUnique: Buf)
+    extends StorageCommand(key, flags, expiry, value, "Cas")
 
 // retrieval commands
 case class Get(keys: Seq[Buf]) extends RetrievalCommand("Get")
 case class Gets(keys: Seq[Buf]) extends RetrievalCommand("Gets")
 
 // arithmetic commands
-case class Incr(key: Buf, value: Long) extends ArithmeticCommand(key, value, "Incr")
-case class Decr(key: Buf, value: Long) extends ArithmeticCommand(key, -value, "Decr")
+case class Incr(override val key: Buf, value: Long) extends ArithmeticCommand(key, value, "Incr")
+case class Decr(override val key: Buf, value: Long) extends ArithmeticCommand(key, -value, "Decr")
 
 // other commands
-case class Delete(key: Buf) extends Command("Delete") with KeyValidation {
-  def keys: Seq[Buf] = Seq(key)
+case class Delete(key: Buf) extends Command("Delete") {
+  KeyValidation.checkKey(key)
 }
 case class Stats(args: Seq[Buf]) extends NonStorageCommand("Stats")
 case class Quit() extends Command("Quit")
 
 // twemcache specific commands
-case class Upsert(key: Buf, flags: Int, expiry: Time, value: Buf, version: Buf)
+case class Upsert(override val key: Buf, flags: Int, expiry: Time, value: Buf, version: Buf)
     extends StorageCommand(key, flags, expiry, value, "Upsert")
 case class Getv(keys: Seq[Buf]) extends RetrievalCommand("Getv")

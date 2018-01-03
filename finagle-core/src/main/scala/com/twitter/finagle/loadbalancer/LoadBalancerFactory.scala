@@ -6,6 +6,7 @@ import com.twitter.finagle.stats._
 import com.twitter.finagle.util.DefaultMonitor
 import com.twitter.util.{Activity, Var}
 import java.util.logging.{Level, Logger}
+import scala.util.control.NonFatal
 
 /**
  * Exposes a [[Stack.Module]] which composes load balancing into the respective
@@ -97,12 +98,6 @@ object LoadBalancerFactory {
    * final ordering decision is left to the load balancer implementations.
    * This only provides a stable ordering before we hand off the collection
    * of endpoints to the balancer.
-   *
-   * The default reads the process global ordering from [[defaultAddressOrdering]].
-   *
-   * @note This is configurable to allow for environment specific orderings.
-   * See [[defaultAddressOrdering]] for a way to set the ordering for the
-   * entire process.
    */
   case class AddressOrdering(ordering: Ordering[Address]) {
     def mk(): (AddressOrdering, Stack.Param[AddressOrdering]) =
@@ -110,6 +105,7 @@ object LoadBalancerFactory {
   }
 
   object AddressOrdering {
+
     implicit val param = new Stack.Param[AddressOrdering] {
       def default: AddressOrdering = AddressOrdering(defaultAddressOrdering)
     }
@@ -152,7 +148,8 @@ object LoadBalancerFactory {
       implicitly[Stack.Param[param.Stats]],
       implicitly[Stack.Param[param.Logger]],
       implicitly[Stack.Param[param.Monitor]],
-      implicitly[Stack.Param[param.Reporter]])
+      implicitly[Stack.Param[param.Reporter]]
+    )
 
     def make(
       params: Stack.Params,
@@ -169,7 +166,7 @@ object LoadBalancerFactory {
       val param.Reporter(reporter) = params[param.Reporter]
 
       val rawStatsReceiver = statsReceiver match {
-        case sr: RollupStatsReceiver => sr.self
+        case sr: RollupStatsReceiver => sr.underlying.head
         case sr => sr
       }
 
@@ -183,15 +180,17 @@ object LoadBalancerFactory {
       // Creates a ServiceFactory from the `next` in the stack and ensures
       // that `sockaddr` is an available param for `next`.
       def newEndpoint(addr: Address): ServiceFactory[Req, Rep] = {
-        val stats = if (hostStatsReceiver.isNull) statsReceiver else {
-          val scope = addr match {
-            case Address.Inet(ia, _) =>
-              "%s:%d".format(ia.getHostName, ia.getPort)
-            case other => other.toString
+        val stats =
+          if (hostStatsReceiver.isNull) statsReceiver
+          else {
+            val scope = addr match {
+              case Address.Inet(ia, _) =>
+                "%s:%d".format(ia.getHostName, ia.getPort)
+              case other => other.toString
+            }
+            val host = hostStatsReceiver.scope(label).scope(scope)
+            BroadcastStatsReceiver(Seq(host, statsReceiver))
           }
-          val host = hostStatsReceiver.scope(label).scope(scope)
-          BroadcastStatsReceiver(Seq(host, statsReceiver))
-        }
 
         val composite = {
           val ia = addr match {
@@ -205,10 +204,12 @@ object LoadBalancerFactory {
           reporter(label, ia).andThen(monitor.orElse(defaultMonitor))
         }
 
-        next.make(params +
-          Transporter.EndpointAddr(addr) +
-          param.Stats(stats) +
-          param.Monitor(composite))
+        next.make(
+          params +
+            Transporter.EndpointAddr(addr) +
+            param.Stats(stats) +
+            param.Monitor(composite)
+        )
       }
 
       val balancerStats = rawStatsReceiver.scope("loadbalancer")
@@ -217,14 +218,21 @@ object LoadBalancerFactory {
       def newBalancer(
         endpoints: Activity[Set[EndpointFactory[Req, Rep]]]
       ): ServiceFactory[Req, Rep] = {
-        // note, we late bind these so that we can read the latest value of
-        // `addressOrdering` if it's set to `defaultAddressOrdering`.
-        val AddressOrdering(addressOrdering) = params[AddressOrdering]
+        val ordering = params[AddressOrdering].ordering
         val orderedEndpoints = endpoints.map { set =>
-          set.toVector.sortBy(_.address)(addressOrdering)
+          try set.toVector.sortBy(_.address)(ordering)
+          catch {
+            case NonFatal(exc) =>
+              log.log(Level.WARNING, "Unable to order endpoints via AddressOrdering", exc)
+              set.toVector
+          }
         }
-        val underlying = loadBalancerFactory.newBalancer(orderedEndpoints, balancerStats, balancerExc)
 
+        val underlying = loadBalancerFactory.newBalancer(
+          orderedEndpoints,
+          balancerExc,
+          params + param.Stats(balancerStats)
+        )
         params[WhenNoNodesOpenParam].whenNoNodesOpen match {
           case WhenNoNodesOpen.PickOne => underlying
           case WhenNoNodesOpen.FailFast => new NoNodesOpenServiceFactory(underlying)
@@ -249,13 +257,16 @@ object LoadBalancerFactory {
 
       // Instead of simply creating a newBalancer here, we defer to the
       // traffic distributor to interpret weighted `Addresses`.
-      Stack.Leaf(role, new TrafficDistributor[Req, Rep](
-        dest = destActivity,
-        newEndpoint = newEndpoint,
-        newBalancer = newBalancer,
-        eagerEviction = !probationEnabled,
-        statsReceiver = balancerStats
-      ))
+      Stack.Leaf(
+        role,
+        new TrafficDistributor[Req, Rep](
+          dest = destActivity,
+          newEndpoint = newEndpoint,
+          newBalancer = newBalancer,
+          eagerEviction = !probationEnabled,
+          statsReceiver = balancerStats
+        )
+      )
     }
   }
 
@@ -275,6 +286,7 @@ object LoadBalancerFactory {
  * for more details.
  */
 abstract class LoadBalancerFactory {
+
   /**
    * Returns a new balancer which is represented by a [[com.twitter.finagle.ServiceFactory]].
    *
@@ -282,18 +294,16 @@ abstract class LoadBalancerFactory {
    * So the interface to build a balancer is wrapped in an [[com.twitter.util.Activity]]
    * which allows us to observe this process for changes.
    *
-   * @param statsReceiver The StatsReceiver which balancers report stats to. See
-   * [[com.twitter.finagle.loadbalancer.Balancer]] to see which stats are exported
-   * across implementations.
-   *
    * @param emptyException The exception returned when a balancer's collection is empty.
+   *
+   * @param params A collection of parameters usually passed in from the client stack.
    *
    * @note `endpoints` are ordered by the [[LoadBalancerFactory.AddressOrdering]] param.
    */
   def newBalancer[Req, Rep](
     endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
-    statsReceiver: StatsReceiver,
-    emptyException: NoBrokersAvailableException
+    emptyException: NoBrokersAvailableException,
+    params: Stack.Params
   ): ServiceFactory[Req, Rep]
 }
 
@@ -318,9 +328,9 @@ object DefaultBalancerFactory extends LoadBalancerFactory {
 
   def newBalancer[Req, Rep](
     endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
-    statsReceiver: StatsReceiver,
-    emptyException: NoBrokersAvailableException
+    emptyException: NoBrokersAvailableException,
+    params: Stack.Params
   ): ServiceFactory[Req, Rep] = {
-    underlying.newBalancer(endpoints, statsReceiver, emptyException)
+    underlying.newBalancer(endpoints, emptyException, params)
   }
 }

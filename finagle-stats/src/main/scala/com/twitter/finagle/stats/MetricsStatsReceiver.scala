@@ -1,197 +1,65 @@
 package com.twitter.finagle.stats
 
 import com.twitter.app.GlobalFlag
-import com.twitter.common.metrics.{AbstractGauge, HistogramInterface, Metrics}
 import com.twitter.finagle.http.{HttpMuxHandler, Route, RouteIndex}
-import com.twitter.finagle.tracing.Trace
-import com.twitter.io.Buf
 import com.twitter.logging.{Level, Logger}
-import com.twitter.util.events.{Event, Sink}
 import com.twitter.util.lint.{Category, GlobalRules, Issue, Rule}
-import com.twitter.util.{Throw, Time, Try}
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.LongAdder
 import scala.collection.JavaConverters._
-
-private object Json {
-  import com.fasterxml.jackson.annotation.JsonInclude
-  import com.fasterxml.jackson.core.`type`.TypeReference
-  import com.fasterxml.jackson.databind.{ObjectMapper, JsonNode}
-  import com.fasterxml.jackson.databind.annotation.JsonDeserialize
-  import com.fasterxml.jackson.module.scala.DefaultScalaModule
-  import java.lang.reflect.{Type, ParameterizedType}
-
-  @JsonInclude(JsonInclude.Include.NON_ABSENT)
-  case class Envelope[A](
-      id: String,
-      when: Long,
-      // We require an annotation here, because for small numbers, this gets
-      // deserialized with a runtime type of int.
-      // See: https://github.com/FasterXML/jackson-module-scala/issues/106.
-      @JsonDeserialize(contentAs = classOf[java.lang.Long]) traceId: Option[Long],
-      @JsonDeserialize(contentAs = classOf[java.lang.Long]) spanId: Option[Long],
-      data: A)
-
-  val mapper = new ObjectMapper()
-  mapper.registerModule(DefaultScalaModule)
-
-  def serialize(o: AnyRef): String = mapper.writeValueAsString(o)
-
-  def deserialize[T: Manifest](value: String): T =
-    mapper.readValue(value, typeReference[T])
-
-  def deserialize[T: Manifest](node: JsonNode): T =
-    mapper.readValue(node.traverse, typeReference[T])
-
-  private def typeReference[T: Manifest] = new TypeReference[T] {
-    override def getType = typeFromManifest(manifest[T])
-  }
-
-  private def typeFromManifest(m: Manifest[_]): Type =
-    if (m.typeArguments.isEmpty) m.runtimeClass else new ParameterizedType {
-      def getRawType = m.runtimeClass
-      def getActualTypeArguments = m.typeArguments.map(typeFromManifest).toArray
-      def getOwnerType = null
-    }
-}
 
 // The ordering issue is that LoadService is run early in the startup
 // lifecycle, typically before Flags are loaded. By using a system
 // property you can avoid that brittleness.
-object debugLoggedStatNames extends GlobalFlag[Set[String]](
-  Set.empty,
-  "Comma separated stat names for logging observed values" +
-    " (set via a -D system property to avoid load ordering issues)"
-)
+object debugLoggedStatNames
+    extends GlobalFlag[Set[String]](
+      Set.empty,
+      "Comma separated stat names for logging observed values" +
+        " (set via a -D system property to avoid load ordering issues)"
+    )
 
 // It's possible to override the scope separator (the default value for `MetricsStatsReceiver` is
 // `"/"`), which is used to separate scopes defined by  `StatsReceiver`. This flag might be useful
 // while migrating from Commons Stats (i.e., `CommonsStatsReceiver`), which is configured to use
 // `"_"` as scope separator.
-object scopeSeparator extends GlobalFlag[String](
-  "/",
-  "Override the scope separator."
-)
+object scopeSeparator
+    extends GlobalFlag[String](
+      "/",
+      "Override the scope separator."
+    )
 
 object MetricsStatsReceiver {
-  val defaultRegistry = Metrics.root()
-  private[this] val _defaultHostRegistry = Metrics.createDetached()
-  val defaultHostRegistry = _defaultHostRegistry
-
-  private def defaultFactory(name: String): HistogramInterface =
-    new MetricsBucketedHistogram(name)
+  val defaultRegistry = new Metrics()
+  private[stats] val defaultHostRegistry = new Metrics()
 
   /**
    * A semi-arbitrary value, but should a service call any counter/stat/addGauge
    * this often, it's a good indication that they are not following best practices.
    */
   private val CreateRequestLimit = 100000L
-
-  private[this] case class CounterIncrData(name: String, value: Long)
-  private[this] case class StatAddData(name: String, delta: Long)
-
-  /**
-   * The [[com.twitter.util.events.Event.Type Event.Type]] for counter increment events.
-   */
-  val CounterIncr: Event.Type = {
-    new Event.Type {
-      val id = "CounterIncr"
-
-      def serialize(event: Event) = event match {
-        case Event(etype, when, value, name: String, _, tid, sid) if etype eq this =>
-          val (t, s) = serializeTrace(tid, sid)
-          val env = Json.Envelope(id, when.inMilliseconds, t, s, CounterIncrData(name, value))
-          Try(Buf.Utf8(Json.serialize(env)))
-
-        case _ =>
-          Throw(new IllegalArgumentException("unknown format: " + event))
-      }
-
-      def deserialize(buf: Buf) = for {
-        env <- Buf.Utf8.unapply(buf) match {
-          case None => Throw(new IllegalArgumentException("unknown format"))
-          case Some(str) => Try(Json.deserialize[Json.Envelope[CounterIncrData]](str))
-        }
-        if env.id == id
-      } yield {
-        val when = Time.fromMilliseconds(env.when)
-        // This line fails without the JsonDeserialize annotation in Envelope.
-        val tid = env.traceId.getOrElse(Event.NoTraceId)
-        val sid = env.spanId.getOrElse(Event.NoSpanId)
-        Event(this, when, longVal = env.data.value,
-          objectVal = env.data.name, traceIdVal = tid, spanIdVal = sid)
-      }
-    }
-  }
-
-  /**
-   * The [[com.twitter.util.events.Event.Type Event.Type]] for stat add events.
-   */
-  val StatAdd: Event.Type = {
-    new Event.Type {
-      val id = "StatAdd"
-
-      def serialize(event: Event) = event match {
-        case Event(etype, when, delta, name: String, _, tid, sid) if etype eq this =>
-          val (t, s) = serializeTrace(tid, sid)
-          val env = Json.Envelope(id, when.inMilliseconds, t, s, StatAddData(name, delta))
-          Try(Buf.Utf8(Json.serialize(env)))
-
-        case _ =>
-          Throw(new IllegalArgumentException("unknown format: " + event))
-      }
-
-      def deserialize(buf: Buf) = for {
-        env <- Buf.Utf8.unapply(buf) match {
-          case None => Throw(new IllegalArgumentException("unknown format"))
-          case Some(str) => Try(Json.deserialize[Json.Envelope[StatAddData]](str))
-        }
-        if env.id == id
-      } yield {
-        val when = Time.fromMilliseconds(env.when)
-        // This line fails without the JsonDeserialize annotation in Envelope.
-        val tid = env.traceId.getOrElse(Event.NoTraceId)
-        val sid = env.spanId.getOrElse(Event.NoSpanId)
-        Event(this, when, longVal = env.data.delta,
-          objectVal = env.data.name, traceIdVal = tid, spanIdVal = sid)
-      }
-    }
-  }
 }
 
 /**
- * This implementation of StatsReceiver uses the [[com.twitter.common.metrics]] library under
- * the hood.
+ * The standard implementation of StatsReceiver, optimized to be high precision
+ * and low overhead.
  *
- * Note: Histogram uses [[com.twitter.common.stats.WindowedApproxHistogram]] under the hood.
- * It is (by default) configured to store events in a 80 seconds moving window, reporting
- * metrics on the first 60 seconds. It means that when you add a value, you need to wait at most
- * 20 seconds before this value will be aggregated in the exported metrics.
+ * Note: Histogram is configured to store events in 60 second snapshots.  It
+ * means that when you add a value, you need to wait at most 20 seconds before
+ * this value will be aggregated in the exported metrics.
  */
-class MetricsStatsReceiver(
-  val registry: Metrics,
-  sink: Sink,
-  histogramFactory: String => HistogramInterface
-) extends WithHistogramDetails
-  with StatsReceiverWithCumulativeGauges {
+class MetricsStatsReceiver(val registry: Metrics)
+    extends StatsReceiverWithCumulativeGauges
+    with WithHistogramDetails {
+
   import MetricsStatsReceiver._
 
-  def this(registry: Metrics, sink: Sink) = this(registry, sink, MetricsStatsReceiver.defaultFactory)
-  def this(registry: Metrics) = this(registry, Sink.default)
   def this() = this(MetricsStatsReceiver.defaultRegistry)
 
-  val repr = this
+  def repr: MetricsStatsReceiver = this
 
-  // Use for backward compatibility with ostrich caching behavior
-  private[this] val counters = new ConcurrentHashMap[Seq[String], Counter]
-  private[this] val stats = new ConcurrentHashMap[Seq[String], Stat]
+  def histogramDetails: Map[String, HistogramDetail] = registry.histoDetails.asScala.toMap
 
   // Used to store underlying histogram counts
-  private[this] val histoDetails = new ConcurrentHashMap[String, HistogramDetail]
-
   private[this] val log = Logger.get()
-
-  private[this] val loggedStats: Set[String] = debugLoggedStatNames()
 
   private[this] val counterRequests = new LongAdder()
   private[this] val statRequests = new LongAdder()
@@ -233,115 +101,55 @@ class MetricsStatsReceiver(
   /**
    * Create and register a counter inside the underlying Metrics library
    */
-  def counter(names: String*): Counter = {
+  def counter(verbosity: Verbosity, names: String*): Counter = {
     if (log.isLoggable(Level.TRACE))
       log.trace(s"Calling StatsReceiver.counter on $names")
     counterRequests.increment()
-    var counter = counters.get(names)
-    if (counter == null) counters.synchronized {
-      counter = counters.get(names)
-      if (counter == null) {
-        counter = new Counter {
-          val metricsCounter = registry.createCounter(format(names))
-          def incr(delta: Int): Unit = {
-            metricsCounter.add(delta)
-            if (sink.recording) {
-              if (Trace.hasId) {
-                val traceId = Trace.id
-                sink.event(CounterIncr, objectVal = metricsCounter.getName(), longVal = delta,
-                  traceIdVal = traceId.traceId.self, spanIdVal = traceId.spanId.self)
-              } else {
-                sink.event(CounterIncr, objectVal = metricsCounter.getName(), longVal = delta)
-              }
-            }
-          }
-        }
-        counters.put(names, counter)
-      }
-    }
-    counter
+
+    val storeCounter = registry.getOrCreateCounter(verbosity, names)
+    storeCounter.counter
   }
 
   /**
    * Create and register a stat (histogram) inside the underlying Metrics library
    */
-  def stat(names: String*): Stat = {
+  def stat(verbosity: Verbosity, names: String*): Stat = {
     if (log.isLoggable(Level.TRACE))
       log.trace(s"Calling StatsReceiver.stat for $names")
     statRequests.increment()
-    var stat = stats.get(names)
-    if (stat == null) stats.synchronized {
-      stat = stats.get(names)
-      if (stat == null) {
-        val doLog = loggedStats.contains(format(names))
-        stat = new Stat {
-          val histogram = histogramFactory(format(names))
-          registry.registerHistogram(histogram)
-          def add(value: Float): Unit = {
-            if (doLog) log.info(s"Stat ${histogram.getName()} observed $value")
-            val asLong = value.toLong
-            histogram.add(asLong)
-            if (sink.recording) {
-              if (Trace.hasId) {
-                val traceId = Trace.id
-                sink.event(StatAdd, objectVal = histogram.getName(), longVal = asLong,
-                  traceIdVal = traceId.traceId.self, spanIdVal = traceId.spanId.self)
-              } else {
-                sink.event(StatAdd, objectVal = histogram.getName(), longVal = asLong)
-              }
-            }
-          }
-          // Provide read-only access to underlying histogram through histoDetails
-          val statName = format(names)
-          histogram match {
-            case histo: MetricsBucketedHistogram => 
-              histoDetails.put(statName, histo.histogramDetail)
-            case _ => 
-              log.debug(s"$statName's histogram implementation doesn't support details")
-          }
-        }
-        stats.put(names, stat)
-      }
-    }
-    stat
+    val storeStat = registry.getOrCreateStat(verbosity, names)
+    storeStat.stat
   }
 
-  override def addGauge(name: String*)(f: => Float): Gauge = {
+  override def addGauge(verbosity: Verbosity, name: String*)(f: => Float): Gauge = {
     if (log.isLoggable(Level.TRACE))
       log.trace(s"Calling StatsReceiver.addGauge for $name")
     gaugeRequests.increment()
-    super.addGauge(name: _*)(f)
+    super.addGauge(verbosity, name: _*)(f)
   }
 
-  protected[this] def registerGauge(names: Seq[String], f: => Float) {
-    val gauge = new AbstractGauge[java.lang.Double](format(names)) {
-      override def read = new java.lang.Double(f)
-    }
-    registry.register(gauge)
-  }
+  protected[this] def registerGauge(verbosity: Verbosity, name: Seq[String], f: => Float): Unit =
+    registry.registerGauge(verbosity, name, f)
 
-  protected[this] def deregisterGauge(names: Seq[String]) {
-    registry.unregister(format(names))
-  }
-
-  private[this] def format(names: Seq[String]) = names.mkString(separator)
-
-  def histogramDetails: Map[String, HistogramDetail] = histoDetails.asScala.toMap
-
+  protected[this] def deregisterGauge(name: Seq[String]): Unit = registry.unregisterGauge(name)
 }
 
 class MetricsExporter(val registry: Metrics)
-  extends JsonExporter(registry)
-  with HttpMuxHandler
-  with MetricsRegistry
-{
+    extends JsonExporter(registry)
+    with HttpMuxHandler
+    with MetricsRegistry {
   def this() = this(MetricsStatsReceiver.defaultRegistry)
   val pattern = "/admin/metrics.json"
-  def route: Route = Route(
-    pattern = pattern,
-    handler = this,
-    index = Some(RouteIndex(
-      alias = "Metrics",
-      group = "Metrics",
-      path = Some("/admin/metrics.json?pretty=true"))))
+  def route: Route =
+    Route(
+      pattern = pattern,
+      handler = this,
+      index = Some(
+        RouteIndex(
+          alias = "Metrics",
+          group = "Metrics",
+          path = Some("/admin/metrics.json?pretty=true")
+        )
+      )
+    )
 }

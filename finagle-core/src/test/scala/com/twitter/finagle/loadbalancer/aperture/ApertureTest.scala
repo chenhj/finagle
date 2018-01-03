@@ -8,6 +8,7 @@ import com.twitter.util.{Activity, Await, Duration, NullTimer}
 import org.scalatest.FunSuite
 
 class ApertureTest extends FunSuite with ApertureSuite {
+
   /**
    * A simple aperture balancer which doesn't have a controller or load metric
    * mixed in since we only want to test the aperture behavior exclusive of
@@ -22,9 +23,9 @@ class ApertureTest extends FunSuite with ApertureSuite {
   private class Bal extends TestBal {
     protected def statsReceiver = NullStatsReceiver
     protected class Node(val factory: EndpointFactory[Unit, Unit])
-      extends ServiceFactoryProxy[Unit, Unit](factory)
-      with NodeT[Unit, Unit]
-      with ApertureNode {
+        extends ServiceFactoryProxy[Unit, Unit](factory)
+        with NodeT[Unit, Unit]
+        with ApertureNode {
       // We don't need a load metric since this test only focuses on
       // the internal behavior of aperture.
       def id: Int = 0
@@ -51,6 +52,7 @@ class ApertureTest extends FunSuite with ApertureSuite {
         maxEffort = 0,
         rng = Rng.threadLocal,
         statsReceiver = NullStatsReceiver,
+        label = "",
         timer = new NullTimer,
         emptyException = new NoBrokersAvailableException,
         useDeterministicOrdering = false
@@ -99,7 +101,7 @@ class ApertureTest extends FunSuite with ApertureSuite {
     val counts = new Counts
     val bal = new Bal
     bal.update(counts.range(10))
-    assert(bal.unitsx == 10)
+    assert(bal.maxUnitsx == 10)
     bal.applyn(100)
     assert(counts.nonzero.size == 1)
 
@@ -213,16 +215,22 @@ class ApertureTest extends FunSuite with ApertureSuite {
 
     DeterministicOrdering.unsetCoordinate()
 
-    val servers = Vector.tabulate(10) { i => Factory(i) }
+    val servers = Vector.tabulate(10) { i =>
+      Factory(i)
+    }
 
     val distSnap = bal.distx
     bal.update(servers)
     assert(distSnap ne bal.distx)
-    assert(servers.indices.forall { i => bal.distx.vector(i) == servers(i) })
+    assert(servers.indices.forall { i =>
+      bal.distx.vector(i) == servers(i)
+    })
 
     DeterministicOrdering.setCoordinate(offset = 0, instanceId = 1, totalInstances = 10)
     bal.update(servers)
-    assert(servers.indices.exists { i => bal.distx.vector(i) != servers(i) })
+    assert(servers.indices.exists { i =>
+      bal.distx.vector(i) != servers(i)
+    })
   }
 
   test("no-arg rebuilds are idempotent") {
@@ -232,7 +240,9 @@ class ApertureTest extends FunSuite with ApertureSuite {
 
     DeterministicOrdering.setCoordinate(0, 5, 10)
 
-    val servers = Vector.tabulate(10) { i => Factory(i) }
+    val servers = Vector.tabulate(10) { i =>
+      Factory(i)
+    }
     bal.update(servers)
 
     val order = bal.distx.vector
@@ -241,7 +251,9 @@ class ApertureTest extends FunSuite with ApertureSuite {
       // coordinate. Thus, the rebuild should be a no-op for
       // the ordering.
       bal.rebuildx()
-      assert(order.indices.forall { i => order(i) == bal.distx.vector(i) })
+      assert(order.indices.forall { i =>
+        order(i) == bal.distx.vector(i)
+      })
     }
   }
 
@@ -256,7 +268,9 @@ class ApertureTest extends FunSuite with ApertureSuite {
     val numClients = 6
     val offset = 0
 
-    bal.update(Vector.tabulate(numServers) { i => Factory(i) })
+    bal.update(Vector.tabulate(numServers) { i =>
+      Factory(i)
+    })
 
     for (i <- 0 until numClients) {
       DeterministicOrdering.setCoordinate(offset, i, numClients)
@@ -276,5 +290,44 @@ class ApertureTest extends FunSuite with ApertureSuite {
       bal.rebuildx()
       assert(bal.aperturex == numClients)
     }
+  }
+
+  test("order maintained when status flaps") {
+    val bal = new Bal {
+      override protected val useDeterministicOrdering = true
+    }
+
+    DeterministicOrdering.unsetCoordinate()
+
+    val servers = Vector.tabulate(5) { i =>
+      Factory(i)
+    }
+    bal.update(servers)
+
+    // 3 of 5 servers are in the aperture
+    bal.adjustx(2)
+    assert(bal.aperturex == 3)
+
+    // set a coordinate so that we get a new order
+    DeterministicOrdering.setCoordinate(offset = 0, instanceId = 3, totalInstances = 5)
+
+    // force rebuild, ensure the order has changed
+    bal.rebuildx()
+    val dorder = bal.distx.vector
+    assert(servers != dorder)
+
+    // We just happen to know that based on our ordering, instance 2 is in the aperture.
+    // Note, we have an aperture of 3 and 1 down, so the probability of picking the down
+    // node with p2c is ((1/3)^2)^maxEffort . Instead of attempting to hit this case, we
+    // force a rebuild artificially.
+    servers(2).status = Status.Busy
+    bal.rebuildx()
+    assert(dorder != bal.distx.vector)
+    assert(servers(2) == bal.distx.vector.last.factory)
+
+    // flip back status, order is returned to dorder
+    servers(2).status = Status.Open
+    bal.rebuildx()
+    assert(dorder == bal.distx.vector)
   }
 }

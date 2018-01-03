@@ -7,9 +7,6 @@ import com.twitter.finagle.client.RefcountedClosable
 import com.twitter.finagle.service.ResponseClassifier
 import com.twitter.util.Duration
 
-/**
- * '''Experimental:''' This API is under construction.
- */
 object MethodBuilder {
   import client.MethodBuilder._
 
@@ -65,7 +62,8 @@ object MethodBuilder {
       dest,
       stack,
       params,
-      Config.create(thriftMuxClient.stack, params))
+      Config.create(thriftMuxClient.stack, params)
+    )
     new MethodBuilder(thriftMuxClient, mb)
   }
 
@@ -132,8 +130,6 @@ object MethodBuilder {
  * they must create separate Finagle clients for each grouping. While long-lived
  * clients in Finagle are not expensive, they are not free. They create
  * duplicate metrics and waste heap, file descriptors, and CPU.
- *
- * '''Experimental:''' This API is under construction.
  *
  * = Example =
  *
@@ -230,9 +226,9 @@ object MethodBuilder {
  * @see The [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]].
  */
 class MethodBuilder(
-    rich: ThriftRichClient,
-    mb: client.MethodBuilder[ThriftClientRequest, Array[Byte]])
-  extends client.MethodBuilderScaladoc[MethodBuilder] {
+  rich: ThriftRichClient,
+  mb: client.MethodBuilder[ThriftClientRequest, Array[Byte]]
+) extends client.MethodBuilderScaladoc[MethodBuilder] {
 
   def withTimeoutTotal(howLong: Duration): MethodBuilder =
     new MethodBuilder(rich, mb.withTimeout.total(howLong))

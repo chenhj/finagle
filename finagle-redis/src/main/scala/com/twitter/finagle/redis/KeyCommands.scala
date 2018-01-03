@@ -27,7 +27,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def dump(key: Buf): Future[Option[Buf]] =
     doRequest(Dump(key)) {
       case BulkReply(message) => Future.value(Some(message))
-      case EmptyBulkReply     => Future.None
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -72,7 +72,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def keys(pattern: Buf): Future[Seq[Buf]] =
     doRequest(Keys(pattern)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
 
   /**
@@ -127,7 +127,8 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def pTtl(key: Buf): Future[Option[JLong]] =
     doRequest(PTtl(key)) {
       case IntegerReply(n) =>
-        if (n != -1) Future.value(Some(n))
+        // -2 indicates key doesn't exist, -1 is key exists but no ttl set.
+        if (n != -2) Future.value(Some(n))
         else Future.value(None)
     }
 
@@ -139,7 +140,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def scans(cursor: JLong, count: Option[JLong], pattern: Option[Buf]): Future[Seq[Buf]] =
     doRequest(Scan(cursor, count, pattern)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
 
   /**

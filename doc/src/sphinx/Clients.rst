@@ -48,7 +48,7 @@ servers (e.g. HTTP, SOCKS5).
 HTTP Proxy
 ~~~~~~~~~~
 
-There is built-in support for `tunneling TCP-based protocols <http://www.web-cache.com/Writings/Internet-Drafts/draft-luotonen-web-proxy-tunneling-01.txt>`_
+There is built-in support for `tunneling TCP-based protocols <https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01>`_
 through web proxy servers in a default Finagle client that might be used with any TCP traffic, not
 only HTTP(S). See `Squid documentation <http://wiki.squid-cache.org/Features/HTTPS>`_ on this feature.
 
@@ -63,26 +63,32 @@ to `twitter.com`.
   import java.net.SocketAddress
 
   val twitter: Service[Request, Response] = Http.client
-    .configured(Transporter.HttpProxy(Some(new InetSocketAddress("my-proxy-server.com", 3128))))
-    .withSessionQualifier.noFailFast
-    .newService("twitter.com")
+    .withTransport.httpProxyTo(
+      host = "twitter.com:443",
+      credentials = Transporter.Credentials("user", "password")
+    )
+    .newService("inet!my-proxy-server.com:3128") // using local DNS to resolve proxy
 
+While this setup may look somewhat counter intuitive with regards to where the ultimate destination
+and the proxy server address are applied, it enables a variety of resiliency features by utilizing
+Finagle's naming and load balancing subsystems. Given a web proxy server address/name falls under
+a standard name resolution process, it might be (and should be) backed by a replica set (multiple
+hosts) to get the greatest out of a client.
 
 .. note::
 
-  The web proxy server, represented as a static `SocketAddress`, acts as a single point of failure
-  for a client. Whenever a proxy server is down, no traffic is served through the client no matter
-  how big its replica set. This is why :ref:`Fail Fast <client_fail_fast>` is disabled on this
-  client.
-
-  There is better HTTP proxy support coming to Finagle along with the Netty 4 upgrade.
+  There is also a legacy support to web proxy servers available in Finagle via the
+  `Transporter.HttpProxy` stack param. In that case, proxy server is forced to represented as a single
+  `SocketAddress`, which not only introduces a single point of failure within a client (i.e., a
+  client goes offline if a web proxy server is down), but also disables Finagle's resiliency features
+  such as failure detection and load balancing.
 
 SOCKS5 Proxy
 ~~~~~~~~~~~~
 
 SOCKS5 proxy support in Finagle is designed and implemented exclusively for testing/development
 (assuming that SOCKS proxy is provided via `ssh -D`), not for production usage. For production
-traffic, an HTTP proxy should be used instead.
+traffic, an HTTP(S) proxy should be used instead.
 
 Use the following CLI flags to enable SOCKS proxy on every Finagle client on a given JVM instance
 (username and password are optional).
@@ -602,7 +608,7 @@ There are at least two modules in the client stacks that might be viewed as circ
 
 In addition to `Fail Fast` and `Failure Accrual`, some of the protocols (i.e., `Mux`) in
 Finagle support `Ping-based Failure Detectors` [#failure_detectors]_
-(i.e., :finagle-mux-src:`ThresholdFailureDetector <com/twitter/finagle/mux/ThresholdFailureDetector.scala>`).
+(i.e., :src:`ThresholdFailureDetector <com/twitter/finagle/liveness/ThresholdFailureDetector.scala>`).
 
 .. _client_fail_fast:
 
@@ -835,8 +841,6 @@ The filter can be configured with the following parameters:
 
 MethodBuilder
 -------------
-
-.. warning:: These APIs are experimental and subject to change.
 
 .. note:: Currently there is ``MethodBuilder`` support for HTTP and ThriftMux.
           We are waiting on user interest before expanding to more protocols.

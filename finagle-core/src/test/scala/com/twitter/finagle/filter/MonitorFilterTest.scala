@@ -3,10 +3,11 @@ package com.twitter.finagle.filter
 import com.twitter.conversions.time._
 import com.twitter.finagle._
 import com.twitter.finagle.builder.{ClientBuilder, ServerBuilder}
-import com.twitter.finagle.integration.{StringCodec, IntegrationBase}
+import com.twitter.finagle.client.StringClient
+import com.twitter.finagle.server.StringServer
 import com.twitter.util._
 import java.net.{InetAddress, InetSocketAddress}
-import java.util.logging.{Level, StreamHandler, Logger}
+import java.util.logging.{Level, Logger, StreamHandler}
 import org.junit.runner.RunWith
 import org.mockito.Matchers._
 import org.mockito.Mockito.{times, verify, when}
@@ -16,7 +17,7 @@ import org.scalatest.junit.JUnitRunner
 import org.scalatest.mock.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
-class MonitorFilterTest extends FunSuite with MockitoSugar with IntegrationBase {
+class MonitorFilterTest extends FunSuite with MockitoSugar with StringClient with StringServer {
 
   class MockMonitor extends Monitor {
     def handle(cause: Throwable) = false
@@ -82,7 +83,8 @@ class MonitorFilterTest extends FunSuite with MockitoSugar with IntegrationBase 
   }
 
   class MockSourcedException(underlying: Throwable, name: String)
-    extends RuntimeException(underlying) with SourcedException {
+      extends RuntimeException(underlying)
+      with SourcedException {
     def this(name: String) = this(null, name)
     serviceName = name
   }
@@ -106,7 +108,7 @@ class MonitorFilterTest extends FunSuite with MockitoSugar with IntegrationBase 
     val service = mock[Service[String, String]]
     when(service.close(any[Time])) thenReturn Future.Done
     val server = ServerBuilder()
-      .codec(StringCodec)
+      .stack(stringServer)
       .name("FakeService2")
       .bindTo(address)
       .monitor((_, _) => monitor)
@@ -116,13 +118,12 @@ class MonitorFilterTest extends FunSuite with MockitoSugar with IntegrationBase 
     // We cannot mock "service" directly, because we are testing an internal filter defined in the ServerBuilder
     // that sits on top of "service". Therefore we need to create a client to initiates the requests.
     val client = ClientBuilder()
-      .codec(StringCodec)
+      .stack(stringClient)
       .hosts(Seq(server.boundAddress.asInstanceOf[InetSocketAddress]))
       .hostConnectionLimit(1)
       .build()
 
     when(service(any[String])) thenThrow outer // make server service throw the mock exception
-
 
     try {
       val f = Await.result(client("123"))
@@ -134,8 +135,11 @@ class MonitorFilterTest extends FunSuite with MockitoSugar with IntegrationBase 
     verify(monitor).handle(outer)
     verify(mockLogger).log(
       Matchers.eq(Level.SEVERE),
-      Matchers.eq("The 'FakeService2' service FakeService2 on behalf of FakeService1 threw an exception"),
-      Matchers.eq(outer))
+      Matchers.eq(
+        "The 'FakeService2' service FakeService2 on behalf of FakeService1 threw an exception"
+      ),
+      Matchers.eq(outer)
+    )
 
     // need to properly close the client and the server, otherwise they will prevent ExitGuard from exiting and interfere with ExitGuardTest
     Await.ready(client.close(), 1.second)
@@ -146,35 +150,21 @@ class MonitorFilterTest extends FunSuite with MockitoSugar with IntegrationBase 
     val h = new Helper
     import h._
 
-    // mock channel to mock the service provided by a server
-    val preparedFactory = mock[ServiceFactory[String, String]]
-    val preparedServicePromise = new Promise[Service[String, String]]
-    when(preparedFactory()) thenReturn preparedServicePromise
-    when(preparedFactory.close(any[Time])) thenReturn Future.Done
-    when(preparedFactory.map(Matchers.any())) thenReturn
-      preparedFactory.asInstanceOf[ServiceFactory[Any, Nothing]]
-    when(preparedFactory.status) thenReturn(Status.Open)
-
-    val m = new MockChannel
-    when(m.codec.prepareConnFactory(any[ServiceFactory[String, String]], any[Stack.Params])) thenReturn preparedFactory
-
-    val client = m.clientBuilder
-      .monitor(_ => monitor)
-      .logger(mockLogger)
-      .build()
-
-    val requestFuture = client("123")
-
-    assert(!requestFuture.isDefined)
     val mockService = new Service[String, String] {
       def apply(request: String): Future[String] = Future.exception(outer)
     }
 
-    preparedServicePromise() = Return(mockService)
-    assert(requestFuture.poll == Some(Throw(outer)))
+    val client = ClientBuilder()
+      .stack(stringClient.withEndpoint(mockService))
+      .monitor(_ => monitor)
+      .logger(mockLogger)
+      .hosts(Seq(new InetSocketAddress(0)))
+      .build()
 
+    val response = Await.result(client("123").liftToTry, 10.seconds)
+
+    assert(response == Throw(outer))
     verify(monitor, times(0)).handle(inner)
     verify(monitor).handle(outer)
   }
-
 }

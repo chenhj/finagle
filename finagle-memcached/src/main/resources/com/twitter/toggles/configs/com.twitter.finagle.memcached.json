@@ -1,0 +1,9 @@
+{
+  "toggles": [
+    {
+      "id": "com.twitter.finagle.memcached.UseTwoConnections",
+      "description": "Enables default of two connections for Memcached",
+      "fraction": 0.0
+    }
+  ]
+}

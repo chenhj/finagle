@@ -3,6 +3,8 @@ package com.twitter.finagle.netty4.ssl.server
 import com.twitter.finagle.netty4.param.Allocator
 import com.twitter.finagle.netty4.ssl.Netty4SslConfigurations
 import com.twitter.finagle.ssl._
+import com.twitter.util.{Return, Throw}
+import com.twitter.util.security.X509CertificateFile
 import com.twitter.finagle.ssl.server.{SslServerConfiguration, SslServerEngineFactory}
 import io.netty.buffer.ByteBufAllocator
 import io.netty.handler.ssl.{OpenSsl, SslContextBuilder}
@@ -12,18 +14,27 @@ import io.netty.handler.ssl.{OpenSsl, SslContextBuilder}
  * recommended path for using native SSL/TLS engines within Finagle.
  */
 class Netty4ServerEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
-  extends SslServerEngineFactory {
+    extends SslServerEngineFactory {
 
   private[this] def startWithKey(keyCredentials: KeyCredentials): SslContextBuilder =
     keyCredentials match {
       case KeyCredentials.Unspecified =>
         throw SslConfigurationException.notSupported(
-          "KeyCredentials.Unspecified", "Netty4ServerEngineFactory")
+          "KeyCredentials.Unspecified",
+          "Netty4ServerEngineFactory"
+        )
       case KeyCredentials.CertAndKey(certFile, keyFile) =>
         SslContextBuilder.forServer(certFile, keyFile)
-      case _: KeyCredentials.CertKeyAndChain =>
-        throw SslConfigurationException.notSupported(
-          "KeyCredentials.CertKeyAndChain", "Netty4ServerEngineFactory")
+      case KeyCredentials.CertKeyAndChain(certFile, keyFile, chainFile) => {
+        (for {
+          key <- Netty4SslConfigurations.getPrivateKey(keyFile)
+          cert <- new X509CertificateFile(certFile).readX509Certificate()
+          chain <- new X509CertificateFile(chainFile).readX509Certificate()
+        } yield SslContextBuilder.forServer(key, cert, chain)) match {
+          case Return(builder) => builder
+          case Throw(ex) => throw new SslConfigurationException(ex.getMessage, ex)
+        }
+      }
     }
 
   /**
@@ -43,11 +54,10 @@ class Netty4ServerEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
    */
   def apply(config: SslServerConfiguration): Engine = {
     val builder = startWithKey(config.keyCredentials)
-
     val withProvider = Netty4SslConfigurations.configureProvider(builder, forceJdk)
     val withTrust = Netty4SslConfigurations.configureTrust(withProvider, config.trustCredentials)
-    val withAppProtocols = Netty4SslConfigurations.configureApplicationProtocols(
-      withTrust, config.applicationProtocols)
+    val withAppProtocols =
+      Netty4SslConfigurations.configureApplicationProtocols(withTrust, config.applicationProtocols)
     val context = withAppProtocols.build()
     val engine = new Engine(context.newEngine(allocator))
     SslServerEngineFactory.configureEngine(engine, config)

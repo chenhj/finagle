@@ -2,24 +2,27 @@ package com.twitter.finagle.netty4.ssl.client
 
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.netty4.ssl.Alpn
-import com.twitter.finagle.ssl.{ApplicationProtocols, Engine, SessionVerifier}
-import com.twitter.finagle.ssl.client.{SslClientConfiguration, SslClientEngineFactory}
+import com.twitter.finagle.ssl.{ApplicationProtocols, Engine}
+import com.twitter.finagle.ssl.client.{
+  SslClientConfiguration,
+  SslClientEngineFactory,
+  SslClientSessionVerifier
+}
 import com.twitter.finagle.transport.Transport
-import com.twitter.finagle.Stack
+import com.twitter.finagle.{Address, Stack}
 import io.netty.channel.{Channel, ChannelInitializer, ChannelPipeline}
 import io.netty.handler.ssl.SslHandler
 import io.netty.util.concurrent.{Future => NettyFuture, GenericFutureListener}
 
 /**
  * A channel handler that takes [[Stack.Params]] and upgrades the pipeline with missing
- * TLS/SSL pieces required for client-side transport encryption.
+ * SSL/TLS pieces required for client-side transport encryption.
  *
  * No matter if the underlying pipeline has been modified or not (or exception was thrown), this
  * handler removes itself from the pipeline on `handlerAdded`.
  */
-private[netty4] class Netty4ClientSslHandler(
-    params: Stack.Params)
-  extends ChannelInitializer[Channel] {
+private[netty4] class Netty4ClientSslHandler(params: Stack.Params)
+    extends ChannelInitializer[Channel] {
 
   // The reason we can't close the channel immediately is because we're in process of decoding an
   // inbound message that is represented by a bunch of TLS records. We need to finish decoding
@@ -32,9 +35,11 @@ private[netty4] class Netty4ClientSslHandler(
       def operationComplete(f: NettyFuture[Channel]): Unit = {
         val channel = f.getNow
         if (channel != null && f.isSuccess) {
-          channel.eventLoop().execute(new Runnable {
-            def run(): Unit = channel.close()
-          })
+          channel
+            .eventLoop()
+            .execute(new Runnable {
+              def run(): Unit = channel.close()
+            })
         }
       }
     }
@@ -64,29 +69,33 @@ private[netty4] class Netty4ClientSslHandler(
   ): SslClientConfiguration = {
     val Alpn(protocols) = params[Alpn]
 
-    config.copy(applicationProtocols =
-      ApplicationProtocols.combine(protocols, config.applicationProtocols))
+    config.copy(
+      applicationProtocols = ApplicationProtocols.combine(protocols, config.applicationProtocols)
+    )
   }
 
   private[this] def createSslHandler(engine: Engine): SslHandler = {
     // Rip the `SSLEngine` out of the wrapper `Engine` and use it to
     // create an `SslHandler`.
-    val ssl: SslHandler = new SslHandler(engine.self)
+    val ssl = new SslHandler(engine.self)
 
     // Close channel on close_notify received from a remote peer.
     ssl.sslCloseFuture().addListener(closeChannelOnCloseNotify)
+
+    // Disable Netty's default handshake timeout (10 seconds). We rely on
+    // Finagle's own timeouts (i.e., session creation timeout) to interrupt
+    // the handshake.
+    ssl.setHandshakeTimeoutMillis(0)
     ssl
   }
 
   private[this] def createSslConnectHandler(
     sslHandler: SslHandler,
+    address: Address,
     config: SslClientConfiguration
   ): SslClientConnectHandler = {
-    val sessionValidation = config.hostname
-      .map(SessionVerifier.hostname)
-      .getOrElse(SessionVerifier.AlwaysValid)
-
-    new SslClientConnectHandler(sslHandler, sessionValidation)
+    val SslClientSessionVerifier.Param(sessionVerifier) = params[SslClientSessionVerifier.Param]
+    new SslClientConnectHandler(sslHandler, address, config, sessionVerifier)
   }
 
   private[this] def addHandlersToPipeline(
@@ -113,7 +122,8 @@ private[netty4] class Netty4ClientSslHandler(
       val combined: SslClientConfiguration = combineApplicationProtocols(config)
       val engine: Engine = factory(address, combined)
       val sslHandler: SslHandler = createSslHandler(engine)
-      val sslConnectHandler: SslClientConnectHandler = createSslConnectHandler(sslHandler, combined)
+      val sslConnectHandler: SslClientConnectHandler =
+        createSslConnectHandler(sslHandler, address, combined)
       addHandlersToPipeline(ch.pipeline(), sslHandler, sslConnectHandler)
     }
   }

@@ -24,6 +24,7 @@ URLs if possible) and [submit a pull request][1]!
 * [Green Man Gaming](http://www.greenmangaming.com/)
 * [Gutefrage.net](http://www.gutefrage.net/)
   * ["Introducing Gutefrage.net's Service-Oriented Architecture"][2]
+* [Hotels.com](https://www.hotels.com)
 * [Hotel Urbano](https://www.hotelurbano.com/)
 * [Hopper](https://www.hopper.com/)
 * [ING Bank](https://ing.nl/)
@@ -49,6 +50,7 @@ URLs if possible) and [submit a pull request][1]!
 * [Salesforce](https://www.salesforce.com/)
 * [Sharethrough](https://www.sharethrough.com/)
   * ["Finagle @ Sharethrough: Twitter #Conf Presentation"][5]
+* [Sigma](https://sig.ma)
 * [SmartNews](https://www.smartnews.com/en/)
   * ["Scala (Finagle) @ SmartNews"][12]
 * [SoFi](https://www.sofi.com/)

@@ -15,7 +15,9 @@ class MockClient(val map: mutable.Map[String, Buf]) extends Client {
   def this() = this(mutable.Map[String, Buf]())
 
   def this(contents: Map[String, Array[Byte]]) =
-    this(mutable.Map[String, Buf]() ++ (contents mapValues { v => Buf.ByteArray.Owned(v) }))
+    this(mutable.Map[String, Buf]() ++ (contents mapValues { v =>
+      Buf.ByteArray.Owned(v)
+    }))
 
   def this(contents: Map[String, String])(implicit m: Manifest[String]) =
     this(contents mapValues { _.getBytes })
@@ -48,7 +50,7 @@ class MockClient(val map: mutable.Map[String, Buf]) extends Client {
   /**
    * Note: expiry and flags are ignored.
    */
-  def set(key: String, flags: Int, expiry: Time, value: Buf) = {
+  def set(key: String, flags: Int, expiry: Time, value: Buf): Future[Unit] = {
     map.synchronized { map(key) = value }
     Future.Unit
   }
@@ -135,7 +137,7 @@ class MockClient(val map: mutable.Map[String, Buf]) extends Client {
             CasResult.Stored
 
           case Some(_) => CasResult.Exists
-          case None    => CasResult.NotFound
+          case None => CasResult.NotFound
         }
       }
     )
@@ -178,9 +180,10 @@ class MockClient(val map: mutable.Map[String, Buf]) extends Client {
 
   def stats(args: Option[String]): Future[Seq[String]] = Future.Nil
 
-  def release() {}
+  def close(deadline: Time): Future[Unit] = Future.Done
+  def release(): Unit = ()
 
-  override def toString = {
+  override def toString: String = {
     "MockClient(" + map.toString + ")"
   }
 

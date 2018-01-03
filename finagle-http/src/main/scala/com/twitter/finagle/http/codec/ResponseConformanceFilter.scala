@@ -1,7 +1,7 @@
 package com.twitter.finagle.http.codec
 
 import com.twitter.finagle.{Service, SimpleFilter}
-import com.twitter.finagle.http.{Fields, Method, Request, Response, Status}
+import com.twitter.finagle.http.{Fields, Method, Request, Response, Status, Version}
 import com.twitter.finagle.http.Status._
 import com.twitter.logging.Logger
 import com.twitter.util.Future
@@ -72,19 +72,24 @@ private[codec] object ResponseConformanceFilter extends SimpleFilter[Request, Re
     val contentLength = rep.length
     if (contentLength > 0) {
       rep.clearContent()
-      logger.error(
+      logger.info(
         "Response with a status code of %d must not have a body-message but it has " +
           "a %d-byte payload, thus the content has been removed.",
-        rep.statusCode, contentLength)
+        rep.statusCode,
+        contentLength
+      )
     }
 
-    if (rep.status != NotModified && mustNotIncludeMessageBody(rep.status)) {
+    if (rep.status != NotModified) {
       if (rep.contentLength.isDefined) {
+        val contentLength = rep.contentLengthOrElse(-1)
         rep.headerMap.remove(Fields.ContentLength)
-        logger.error(
+        logger.info(
           "Response with a status code of %d must not have a Content-Length header field " +
-            "thus the field has been removed.",
-          rep.statusCode)
+            "thus the field has been removed. Content-Length: %d",
+          rep.statusCode,
+          contentLength
+        )
       }
     }
   }
@@ -107,13 +112,24 @@ private[codec] object ResponseConformanceFilter extends SimpleFilter[Request, Re
   }
 
   private[this] def handleChunkedResponse(rep: Response): Unit = {
-    rep.headerMap.set(Fields.TransferEncoding, "chunked")
-
-    // We remove any content-length headers because "A sender MUST NOT
-    // send a Content-Length header field in any message that contains
-    // a Transfer-Encoding header field."
-    // https://tools.ietf.org/html/rfc7230#section-3.3.2
-    rep.headerMap.remove(Fields.ContentLength)
+    // Evaluation order for managing chunked Responses
+    // - If the message is HTTP/1.0 any Transfer-Encoding headers are stripped
+    //   since HTTP/1.0 doesn't know about transfer-encoding.
+    //   https://tools.ietf.org/html/rfc7230#appendix-A.1.3
+    // - If we have a Transfer-Encoding header it overrides a Content-Length
+    //   header by removing it. https://tools.ietf.org/html/rfc7230#section-3.3.3
+    // - If we have a Content-Length header we assume its accurate and don't
+    //   use chunked transfer-encoding.
+    // - If we don't have a content-length header and are not HTTP/1.0 we add
+    //   the 'transfer-encoding: chunked' header.
+    if (rep.version == Version.Http10) {
+      // HTTP/1.0 doesn't have a notion of Transfer-Encoding
+      rep.headerMap.remove(Fields.TransferEncoding)
+    } else if (rep.headerMap.getAll(Fields.TransferEncoding).contains("chunked")) {
+      rep.headerMap.remove(Fields.ContentLength)
+    } else if (!rep.headerMap.contains(Fields.ContentLength)) {
+      rep.headerMap.add(Fields.TransferEncoding, "chunked")
+    }
   }
 
   /**
@@ -137,9 +153,15 @@ private[codec] object ResponseConformanceFilter extends SimpleFilter[Request, Re
     response.headerMap.remove(Fields.TransferEncoding)
 
     if (response.isChunked) {
-      // This was intended to be a chunked response, so we "MUST NOT" include a content-length
-      // header: https://tools.ietf.org/html/rfc7230#section-3.3.2
-      response.headerMap.remove(Fields.ContentLength)
+
+      // This previously removed the content-length field to conform with
+      // https://tools.ietf.org/html/rfc7230#section-3.3.2. However, it was found
+      // that since netty doesn't know what type of request each response belongs
+      // to, it would mistake some HEAD responses as chunked GET responses, due
+      // to the lack of body. This resulted in "chunked" HEAD responses and the
+      // content-length header was then incorrectly stripped here.
+      // This means that if a user incorrectly sets both chunked transfer encoding
+      // and content-length, the content-length will pass through.
 
       // Make sure we don't leave any writers hanging in case they simply called `close`.
       response.reader.discard()
@@ -150,10 +172,12 @@ private[codec] object ResponseConformanceFilter extends SimpleFilter[Request, Re
     }
 
     if (!response.content.isEmpty) {
-      logger.error(
-          "Received response to HEAD request (%s) that contained a static body of length %d. " +
-            "Discarding body. If this is desired behavior, consider adding HeadFilter to your service",
-          request.toString, response.content.length)
+      logger.info(
+        "Received response to HEAD request (%s) that contained a static body of length %d. " +
+          "Discarding body. If this is desired behavior, consider adding HeadFilter to your service",
+        request.toString,
+        response.content.length
+      )
 
       // Might as well salvage a content length header
       if (response.contentLength.isEmpty) {

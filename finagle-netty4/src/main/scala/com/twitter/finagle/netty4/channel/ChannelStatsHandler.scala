@@ -1,7 +1,7 @@
 package com.twitter.finagle.netty4.channel
 
 import com.twitter.finagle.Failure
-import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.stats.{StatsReceiver, Verbosity}
 import com.twitter.util.{Duration, Monitor, Stopwatch}
 import io.netty.buffer.ByteBuf
 import io.netty.channel.ChannelHandler.Sharable
@@ -12,14 +12,16 @@ import java.io.IOException
 import java.util.concurrent.atomic.LongAdder
 import java.util.logging.{Level, Logger}
 
-
 private[channel] case class ChannelStats(bytesRead: LongAdder, bytesWritten: LongAdder)
 
 private[netty4] object ChannelStatsHandler {
   private[channel] val ConnectionStatsKey = AttributeKey.valueOf[ChannelStats]("channel_stats")
-  private[channel] val ConnectionDurationKey = AttributeKey.valueOf[Stopwatch.Elapsed]("connection_duration")
-  private[channel] val ChannelWasWritableKey = AttributeKey.valueOf[Boolean]("channel_has_been_writable")
-  private[channel] val ChannelWritableDurationKey = AttributeKey.valueOf[Stopwatch.Elapsed]("channel_writable_duration")
+  private[channel] val ConnectionDurationKey =
+    AttributeKey.valueOf[Stopwatch.Elapsed]("connection_duration")
+  private[channel] val ChannelWasWritableKey =
+    AttributeKey.valueOf[Boolean]("channel_has_been_writable")
+  private[channel] val ChannelWritableDurationKey =
+    AttributeKey.valueOf[Stopwatch.Elapsed]("channel_writable_duration")
 }
 
 /**
@@ -30,23 +32,30 @@ private[netty4] object ChannelStatsHandler {
  */
 @Sharable
 private[netty4] class ChannelStatsHandler(statsReceiver: StatsReceiver)
-  extends ChannelDuplexHandler {
+    extends ChannelDuplexHandler {
   import ChannelStatsHandler._
 
   private[this] val log = Logger.getLogger(getClass.getName)
   private[this] val connectionCount = new LongAdder()
 
-  private[this] val connects                = statsReceiver.counter("connects")
-  private[this] val connectionDuration      = statsReceiver.stat("connection_duration")
-  private[this] val connectionReceivedBytes = statsReceiver.stat("connection_received_bytes")
-  private[this] val connectionSentBytes     = statsReceiver.stat("connection_sent_bytes")
-  private[this] val receivedBytes           = statsReceiver.counter("received_bytes")
-  private[this] val sentBytes               = statsReceiver.counter("sent_bytes")
-  private[this] val writable                = statsReceiver.counter("socket_writable_ms")
-  private[this] val unwritable              = statsReceiver.counter("socket_unwritable_ms")
-  private[this] val exceptions              = statsReceiver.scope("exn")
-  private[this] val closesCount             = statsReceiver.counter("closes")
-  private[this] val connections             = statsReceiver.addGauge("connections") {
+  private[this] val connects = statsReceiver.counter("connects")
+
+  private[this] val connectionDuration =
+    statsReceiver.stat(Verbosity.Debug, "connection_duration")
+  private[this] val connectionReceivedBytes =
+    statsReceiver.stat(Verbosity.Debug, "connection_received_bytes")
+  private[this] val connectionSentBytes =
+    statsReceiver.stat(Verbosity.Debug, "connection_sent_bytes")
+  private[this] val writable =
+    statsReceiver.counter(Verbosity.Debug, "socket_writable_ms")
+  private[this] val unwritable =
+    statsReceiver.counter(Verbosity.Debug, "socket_unwritable_ms")
+
+  private[this] val receivedBytes = statsReceiver.counter("received_bytes")
+  private[this] val sentBytes = statsReceiver.counter("sent_bytes")
+  private[this] val exceptions = statsReceiver.scope("exn")
+  private[this] val closesCount = statsReceiver.counter("closes")
+  private[this] val connections = statsReceiver.addGauge("connections") {
     connectionCount.sum()
   }
 
@@ -69,11 +78,13 @@ private[netty4] class ChannelStatsHandler(statsReceiver: StatsReceiver)
     msg match {
       case buffer: ByteBuf =>
         val readableBytes = buffer.readableBytes
-        val channelWriteCount = ctx.channel.attr(ConnectionStatsKey).get.bytesWritten
-        channelWriteCount.add(readableBytes)
         sentBytes.incr(readableBytes)
+        ctx.channel.attr(ConnectionStatsKey).get match {
+          case null =>
+          case connStats => connStats.bytesWritten.add(readableBytes)
+        }
       case _ =>
-        log.warning("ChannelStatsHandler received non-channelbuffer write")
+        log.warning("ChannelStatsHandler received non-ByteBuf write: " + msg)
     }
 
     super.write(ctx, msg, p)
@@ -82,12 +93,14 @@ private[netty4] class ChannelStatsHandler(statsReceiver: StatsReceiver)
   override def channelRead(ctx: ChannelHandlerContext, msg: Object): Unit = {
     msg match {
       case buffer: ByteBuf =>
-        val channelReadCount = ctx.channel.attr(ConnectionStatsKey).get.bytesRead
         val readableBytes = buffer.readableBytes
-        channelReadCount.add(readableBytes)
         receivedBytes.incr(readableBytes)
+        ctx.channel.attr(ConnectionStatsKey).get match {
+          case null =>
+          case connStats => connStats.bytesRead.add(readableBytes)
+        }
       case _ =>
-        log.warning("ChannelStatsHandler received non-channelbuffer read")
+        log.warning("ChannelStatsHandler received non-ByteBuf read: " + msg)
     }
 
     super.channelRead(ctx, msg)
@@ -99,14 +112,17 @@ private[netty4] class ChannelStatsHandler(statsReceiver: StatsReceiver)
   }
 
   override def channelInactive(ctx: ChannelHandlerContext): Unit = {
-    val channelStats = ctx.channel.attr(ConnectionStatsKey).get
-    connectionReceivedBytes.add(channelStats.bytesRead.sum())
-    connectionSentBytes.add(channelStats.bytesWritten.sum())
-
-    // we do a null check here because ConnectionDurationKey is added on
-    // `channelActive`, not `handlerAdded`.
-    ctx.channel.attr(ConnectionDurationKey).get match {
-      case null => // the connection didn't initialize
+    // protect against Netty calling this multiple times
+    ctx.channel.attr(ConnectionStatsKey).getAndSet(null) match {
+      case ChannelStats(bytesRead, bytesWritten) =>
+        connectionReceivedBytes.add(bytesRead.sum())
+        connectionSentBytes.add(bytesWritten.sum())
+      case null =>
+    }
+    // protect against multiple calls, and also a channel can go
+    // inactive without ever seeing `channelActive`
+    ctx.channel.attr(ConnectionDurationKey).getAndSet(null) match {
+      case null =>
       case elapsed =>
         connectionDuration.add(elapsed().inMilliseconds)
         connectionCount.decrement()
@@ -129,7 +145,6 @@ private[netty4] class ChannelStatsHandler(statsReceiver: StatsReceiver)
     }
     super.exceptionCaught(ctx, cause)
   }
-
 
   override def channelWritabilityChanged(ctx: ChannelHandlerContext): Unit = {
     val isWritable = ctx.channel.isWritable()

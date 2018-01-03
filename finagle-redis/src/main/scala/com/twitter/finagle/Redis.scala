@@ -2,9 +2,15 @@ package com.twitter.finagle
 
 import com.twitter.finagle
 import com.twitter.finagle.client._
-import com.twitter.finagle.dispatch.GenSerialClientDispatcher
-import com.twitter.finagle.netty4.{Netty4HashedWheelTimer, Netty4Transporter}
-import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
+import com.twitter.finagle.dispatch.{GenSerialClientDispatcher, StalledPipelineTimeout}
+import com.twitter.finagle.netty4.Netty4Transporter
+import com.twitter.finagle.param.{
+  ExceptionStatsHandler => _,
+  Monitor => _,
+  ResponseClassifier => _,
+  Tracer => _,
+  _
+}
 import com.twitter.finagle.redis.exp.RedisPool
 import com.twitter.finagle.redis.protocol.{Command, Reply, StageTransport}
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
@@ -39,12 +45,12 @@ trait RedisRichClient { self: Client[Command, Reply] =>
 object Redis extends Client[Command, Reply] with RedisRichClient {
 
   object Client {
+
     /**
      * Default stack parameters used for redis client.
      */
     private val params: Stack.Params = StackClient.defaultParams +
-      param.ProtocolLibrary("redis") +
-      param.Timer(Netty4HashedWheelTimer)
+      param.ProtocolLibrary("redis")
 
     /**
      * A default client stack which supports the pipelined redis client.
@@ -54,11 +60,11 @@ object Redis extends Client[Command, Reply] with RedisRichClient {
   }
 
   case class Client(
-      stack: Stack[ServiceFactory[Command, Reply]] = Client.stack,
-      params: Stack.Params = Client.params)
-    extends StdStackClient[Command, Reply, Client]
-    with WithDefaultLoadBalancer[Client]
-    with RedisRichClient {
+    stack: Stack[ServiceFactory[Command, Reply]] = Client.stack,
+    params: Stack.Params = Client.params
+  ) extends StdStackClient[Command, Reply, Client]
+      with WithDefaultLoadBalancer[Client]
+      with RedisRichClient {
 
     protected def copy1(
       stack: Stack[ServiceFactory[Command, Reply]] = this.stack,
@@ -74,7 +80,8 @@ object Redis extends Client[Command, Reply] with RedisRichClient {
     protected def newDispatcher(transport: Transport[In, Out]): Service[Command, Reply] =
       RedisPool.newDispatcher(
         new StageTransport(transport),
-        params[finagle.param.Stats].statsReceiver.scope(GenSerialClientDispatcher.StatsScope)
+        params[finagle.param.Stats].statsReceiver.scope(GenSerialClientDispatcher.StatsScope),
+        params[StalledPipelineTimeout].timeout
       )
 
     // Java-friendly forwarders
@@ -101,7 +108,8 @@ object Redis extends Client[Command, Reply] with RedisRichClient {
     override def withResponseClassifier(responseClassifier: ResponseClassifier): Client =
       super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client = super.withRetryBackoff(backoff)
+    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+      super.withRetryBackoff(backoff)
 
     override def withStack(stack: Stack[ServiceFactory[Command, Reply]]): Client =
       super.withStack(stack)

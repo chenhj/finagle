@@ -4,9 +4,14 @@ import com.twitter.finagle._
 import com.twitter.finagle.loadbalancer.p2c.P2CPick
 import com.twitter.finagle.loadbalancer.{Balancer, NodeT, DistributorT}
 import com.twitter.finagle.util.Rng
+import com.twitter.logging.Logger
 import com.twitter.util.{Future, Time}
 import scala.collection.immutable.VectorBuilder
 import scala.collection.mutable.ListBuffer
+
+private object Aperture {
+  private val log = Logger.get()
+}
 
 /**
  * The aperture distributor balances load onto a window, the aperture, of
@@ -25,10 +30,12 @@ import scala.collection.mutable.ListBuffer
  */
 private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self =>
   import DeterministicOrdering._
+  import Aperture._
 
   protected type Node <: ApertureNode
 
   protected trait ApertureNode extends NodeT[Req, Rep] {
+
     /**
      * A token is a random integer associated with an Aperture node.
      * It persists through node updates, but is not necessarily
@@ -47,7 +54,9 @@ private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self
   protected def rng: Rng
 
   /**
-   * The minimum allowable aperture. Must be greater than zero.
+   * The minimum aperture as specified by the user config. Note this value is advisory
+   * and the distributor may actually derive a new min based on this.  See `minUnits`
+   * for more details.
    */
   protected def minAperture: Int
 
@@ -79,10 +88,19 @@ private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self
   protected def aperture: Int = dist.aperture
 
   /**
-   * The number of available serving units.
-   * The maximum aperture size.
+   * The maximum aperture serving units.
    */
-  protected def units: Int = dist.units
+  protected def maxUnits: Int = dist.max
+
+  /**
+   * The minimum aperture serving units.
+   */
+  protected def minUnits: Int = dist.min
+
+  /**
+   * Label used to identify this instance when logging internal state.
+   */
+  protected def label: String
 
   private[this] val gauges = Seq(
     statsReceiver.addGauge("aperture") { aperture },
@@ -91,8 +109,7 @@ private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self
     }
   )
 
-  private[this] val coordinateUpdates =
-    statsReceiver.counter("coordinate_updates")
+  private[this] val coordinateUpdates = statsReceiver.counter("coordinate_updates")
 
   private[this] val coordObservation = DeterministicOrdering.changes.respond { _ =>
     // One nice side-effect of deferring to the balancers `updater` is
@@ -125,20 +142,22 @@ private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self
    * @param initAperture The initial aperture to use.
    */
   protected class Distributor(
-      vector: Vector[Node],
-      original: Vector[Node],
-      busy: Vector[Node],
-      coordinate: Option[Coord],
-      initAperture: Int)
-    extends DistributorT[Node](vector)
-    with P2CPick[Node] {
+    vector: Vector[Node],
+    original: Vector[Node],
+    busy: Vector[Node],
+    coordinate: Option[Coord],
+    initAperture: Int
+  ) extends DistributorT[Node](vector)
+      with P2CPick[Node] {
 
     type This = Distributor
 
-    private[this] val max: Int = vector.size
-    private[this] val min: Int = {
+    val max: Int = vector.size
+
+    val min: Int = {
       val default = math.min(minAperture, vector.size)
-      if (!useDeterministicOrdering) default else {
+      if (!useDeterministicOrdering) default
+      else {
         coordinate match {
           // We want to additionally ensure that we get full ring coverage
           // when there are fewer clients than servers. For example, imagine the
@@ -170,10 +189,19 @@ private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self
     // Make sure the aperture is within bounds [minAperture, maxAperture].
     adjust(0)
 
-    /**
-     * Returns the number of available serving units.
-     */
-    def units: Int = max
+    if (useDeterministicOrdering && aperture > 0) {
+      // We log the contents of the aperture on each distributor rebuild when using
+      // deterministic ordering. Rebuilds are not frequent and usually concentrated around
+      // events where this information would be valuable (i.e. coordinate changes or
+      // host add/removes). Thus, we choose to log this at `info` instead of `debug`.
+      val fmt: Vector[Node] => String = _.map(_.factory.address).mkString("[", ", ", "]")
+      val apertureSlice = fmt(vector.take(math.min(aperture, 100)))
+      val busySlice = fmt(busy)
+      val lbl = if (label.isEmpty) "<unlabelled>" else label
+      log.info(
+        s"Aperture updated for client $lbl: size=$aperture busy=$busySlice nodes=$apertureSlice"
+      )
+    }
 
     /**
      * Returns the current aperture.
@@ -230,8 +258,8 @@ private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self
       while (iter.hasNext) {
         val node = iter.next()
         node.status match {
-          case Status.Open   => resultNodes += node
-          case Status.Busy   => busyNodes += node
+          case Status.Open => resultNodes += node
+          case Status.Busy => busyNodes += node
           case Status.Closed => closedNodes += node
         }
       }
@@ -251,11 +279,11 @@ private[loadbalancer] trait Aperture[Req, Rep] extends Balancer[Req, Rep] { self
      * 2. Otherwise, the vector is sorted by a node's token field.
      */
     def rebuild(vec: Vector[Node]): This = {
-     if (vec.isEmpty) {
+      if (vec.isEmpty) {
         new Distributor(vec, vec, busy, coordinate, aperture)
       } else {
         DeterministicOrdering() match {
-          case someCoord@Some(coord) if useDeterministicOrdering =>
+          case someCoord @ Some(coord) if useDeterministicOrdering =>
             val busyBuilder = new VectorBuilder[Node]
             val newVec = statusOrder(ringOrder(vec, coord.value), busyBuilder)
             new Distributor(newVec, vec, busyBuilder.result, someCoord, aperture)

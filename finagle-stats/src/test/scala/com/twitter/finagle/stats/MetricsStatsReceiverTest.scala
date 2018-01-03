@@ -1,30 +1,21 @@
 package com.twitter.finagle.stats
 
-import com.twitter.common.metrics.{MetricCollisionException, Metrics}
-import com.twitter.util.Time
-import com.twitter.util.events
-import org.junit.runner.RunWith
-import org.scalacheck.{Gen, Arbitrary}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
 
-@RunWith(classOf[JUnitRunner])
-class MetricsStatsReceiverTest extends FunSuite with GeneratorDrivenPropertyChecks {
-  import MetricsStatsReceiverTest._
-
+class MetricsStatsReceiverTest extends FunSuite {
   private[this] val rootReceiver = new MetricsStatsReceiver()
 
-  private[this] def read(metrics: MetricsStatsReceiver, name: String): Number =
-    metrics.registry.sample().get(name)
+  private[this] def readGauge(metrics: MetricsStatsReceiver, name: String): Number =
+    metrics.registry.gauges.get(name)
 
-  private[this] def readInRoot(name: String) = read(rootReceiver, name)
+  private[this] def readGaugeInRoot(name: String) = readGauge(rootReceiver, name)
+  private[this] def readCounterInRoot(name: String) = rootReceiver.registry.counters.get(name)
 
   test("MetricsStatsReceiver should store and read gauge into the root StatsReceiver") {
     val x = 1.5f
     // gauges are weakly referenced by the registry so we need to keep a strong reference
     val g = rootReceiver.addGauge("my_gauge")(x)
-    assert(readInRoot("my_gauge") == x)
+    assert(readGaugeInRoot("my_gauge") == x)
   }
 
   test("cumulative gauge is working") {
@@ -34,7 +25,7 @@ class MetricsStatsReceiverTest extends FunSuite with GeneratorDrivenPropertyChec
     val g1 = rootReceiver.addGauge("my_cumulative_gauge")(x)
     val g2 = rootReceiver.addGauge("my_cumulative_gauge")(y)
     val g3 = rootReceiver.addGauge("my_cumulative_gauge")(z)
-    assert(readInRoot("my_cumulative_gauge") == x + y + z)
+    assert(readGaugeInRoot("my_cumulative_gauge") == x + y + z)
   }
 
   test("Ensure that we throw an exception with a counter and a gauge when rollup collides") {
@@ -55,66 +46,72 @@ class MetricsStatsReceiverTest extends FunSuite with GeneratorDrivenPropertyChec
   }
 
   test("toString") {
-    val sr = new MetricsStatsReceiver(Metrics.createDetached())
+    val sr = new MetricsStatsReceiver(new Metrics())
     assert("MetricsStatsReceiver" == sr.toString)
     assert("MetricsStatsReceiver/s1" == sr.scope("s1").toString)
     assert("MetricsStatsReceiver/s1/s2" == sr.scope("s1").scope("s2").toString)
   }
 
   test("reading histograms initializes correctly") {
-    val sr = new MetricsStatsReceiver(Metrics.createDetached())
+    val sr = new MetricsStatsReceiver(new Metrics())
     val stat = sr.stat("my_cool_stat")
 
-    val reader = sr.histogramDetails.get("my_cool_stat")
-    assert(!reader.isEmpty && reader.get.counts == Nil)
+    val reader = sr.registry.histoDetails.get("my_cool_stat")
+    assert(reader != null && reader.counts == Nil)
   }
 
   test("store and read counter into the root StatsReceiver") {
     rootReceiver.counter("my_counter").incr()
-    assert(readInRoot("my_counter") == 1)
+    assert(readCounterInRoot("my_counter") == 1)
   }
 
   test("separate gauge/stat/metric between detached Metrics and root Metrics") {
-    val detachedReceiver = new MetricsStatsReceiver(Metrics.createDetached())
+    val detachedReceiver = new MetricsStatsReceiver(new Metrics())
     val g1 = detachedReceiver.addGauge("xxx")(1.0f)
     val g2 = rootReceiver.addGauge("xxx")(2.0f)
-    assert(read(detachedReceiver, "xxx") != read(rootReceiver, "xxx"))
+    assert(readGauge(detachedReceiver, "xxx") != readGauge(rootReceiver, "xxx"))
   }
 
-  test("CounterIncr: serialize andThen deserialize = identity") {
-    import MetricsStatsReceiver.CounterIncr
-    def id(e: events.Event) = CounterIncr.serialize(e).flatMap(CounterIncr.deserialize).get
-    forAll(genCounterIncr) { event => assert(id(event) == event) }
+  test("keep track of debug metrics ") {
+    val metrics = new Metrics()
+    val sr = new MetricsStatsReceiver(metrics)
+
+    sr.counter(Verbosity.Debug, "foo")
+    sr.stat(Verbosity.Debug, "bar")
+    sr.addGauge(Verbosity.Debug, "baz")(0f)
+
+    assert(metrics.verbosity.get("foo") == Verbosity.Debug)
+    assert(metrics.verbosity.get("bar") == Verbosity.Debug)
+    assert(metrics.verbosity.get("baz") == Verbosity.Debug)
   }
 
-  test("StatAdd: serialize andThen deserialize = identity") {
-    import MetricsStatsReceiver.StatAdd
-    def id(e: events.Event) = StatAdd.serialize(e).flatMap(StatAdd.deserialize).get
-    forAll(genStatAdd) { event => assert(id(event) == event) }
-  }
-}
+  test("does not keep track of default metrics ") {
+    val metrics = new Metrics()
+    val sr = new MetricsStatsReceiver(metrics)
 
-private[twitter] object MetricsStatsReceiverTest {
-  import MetricsStatsReceiver.{CounterIncr, StatAdd}
-  import Arbitrary.arbitrary
+    sr.counter(Verbosity.Default, "foo")
+    sr.stat(Verbosity.Default, "bar")
+    sr.addGauge(Verbosity.Default, "baz")(0f)
 
-  val genCounterIncr = for {
-    name <- Gen.alphaStr
-    value <- arbitrary[Long]
-    tid <- arbitrary[Long]
-    sid <- arbitrary[Long]
-  } yield {
-    events.Event(CounterIncr, Time.now, longVal = value, objectVal = name,
-      traceIdVal = tid, spanIdVal = sid)
+    assert(!metrics.verbosity.containsKey("foo"))
+    assert(!metrics.verbosity.containsKey("bar"))
+    assert(!metrics.verbosity.containsKey("baz"))
   }
 
-  val genStatAdd = for {
-    name <- Gen.alphaStr
-    delta <- arbitrary[Long]
-    tid <- arbitrary[Long]
-    sid <- arbitrary[Long]
-  } yield {
-    events.Event(StatAdd, Time.now, longVal = delta, objectVal = name,
-      traceIdVal = tid, spanIdVal = sid)
+  test("only assign verbosity at creation") {
+    val metrics = new Metrics()
+    val sr = new MetricsStatsReceiver(metrics)
+
+    sr.counter(Verbosity.Default, "foo")
+    sr.stat(Verbosity.Default, "bar")
+    sr.addGauge(Verbosity.Default, "baz")(0f)
+
+    sr.counter(Verbosity.Debug, "foo")
+    sr.stat(Verbosity.Debug, "bar")
+    sr.addGauge(Verbosity.Debug, "baz")(0f)
+
+    assert(!metrics.verbosity.containsKey("foo"))
+    assert(!metrics.verbosity.containsKey("bar"))
+    assert(!metrics.verbosity.containsKey("baz"))
   }
 }

@@ -7,9 +7,6 @@ import com.twitter.finagle.service.ResponseClassifier
 import com.twitter.finagle.{Name, Resolver, Service, client}
 import com.twitter.util.Duration
 
-/**
- * '''Experimental:''' This API is under construction.
- */
 object MethodBuilder {
 
   /**
@@ -121,8 +118,6 @@ object MethodBuilder {
  * clients in Finagle are not expensive, they are not free. They create
  * duplicate metrics and waste heap, file descriptors, and CPU.
  *
- * '''Experimental:''' This API is under construction.
- *
  * = Example =
  *
  * A client that has timeouts and retries on a 418 status code.
@@ -199,9 +194,8 @@ object MethodBuilder {
  *
  * @see The [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]].
  */
-class MethodBuilder private (
-    mb: client.MethodBuilder[Request, Response])
-  extends client.MethodBuilderScaladoc[MethodBuilder] {
+class MethodBuilder private (mb: client.MethodBuilder[Request, Response])
+    extends client.MethodBuilderScaladoc[MethodBuilder] {
 
   def withTimeoutTotal(howLong: Duration): MethodBuilder =
     new MethodBuilder(mb.withTimeout.total(howLong))

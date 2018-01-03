@@ -30,8 +30,8 @@ private[redis] trait HashCommands { self: BaseClient =>
    */
   def hGet(key: Buf, field: Buf): Future[Option[Buf]] =
     doRequest(HGet(key, field)) {
-      case BulkReply(message)   => Future.value(Some(message))
-      case EmptyBulkReply       => Future.None
+      case BulkReply(message) => Future.value(Some(message))
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -40,8 +40,8 @@ private[redis] trait HashCommands { self: BaseClient =>
   def hGetAll(key: Buf): Future[Seq[(Buf, Buf)]] =
     doRequest(HGetAll(key)) {
       case MBulkReply(messages) => Future.value(returnPairs(ReplyFormat.toBuf(messages)))
-      case EmptyMBulkReply      => Future.Nil
-  }
+      case EmptyMBulkReply => Future.Nil
+    }
 
   /**
    * Increments a `field` on a given hash `key` by `amount`. Returns new field value.
@@ -58,7 +58,7 @@ private[redis] trait HashCommands { self: BaseClient =>
   def hKeys(key: Buf): Future[Seq[Buf]] =
     doRequest(HKeys(key)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
 
   /**
@@ -75,7 +75,7 @@ private[redis] trait HashCommands { self: BaseClient =>
   def hMGet(key: Buf, fields: Seq[Buf]): Future[Seq[Buf]] =
     doRequest(HMGet(key, fields)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
 
   /**
@@ -87,14 +87,34 @@ private[redis] trait HashCommands { self: BaseClient =>
     }
 
   /**
+   * Sets values for given fields stored at the hash `key` and sets the ttl.
+   */
+  def hMSetEx(key: Buf, fv: Map[Buf, Buf], milliseconds: Long): Future[Unit] =
+    doRequest(HMSetEx(key, fv, milliseconds)) {
+      case StatusReply(msg) => Future.Unit
+    }
+
+  /**
+   * Adds values for given fields stored at the hash `key` if it doesn't exist
+   * and sets the ttl. Version set at the destination is retained if it already exists.
+   */
+  def hMergeEx(key: Buf, fv: Map[Buf, Buf], milliseconds: Long): Future[Unit] =
+    doRequest(HMergeEx(key, fv, milliseconds)) {
+      case StatusReply(msg) => Future.Unit
+    }
+
+  /**
    * Returns keys in given hash `key`, starting at `cursor`.
    */
   def hScan(
-    key: Buf, cursor: JLong, count: Option[JLong], pattern: Option[Buf]
+    key: Buf,
+    cursor: JLong,
+    count: Option[JLong],
+    pattern: Option[Buf]
   ): Future[Seq[Buf]] =
     doRequest(HScan(key, cursor, count, pattern)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
 
   /**
@@ -122,6 +142,6 @@ private[redis] trait HashCommands { self: BaseClient =>
   def hVals(key: Buf): Future[Seq[Buf]] =
     doRequest(HVals(key)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
 }

@@ -1,11 +1,17 @@
 package com.twitter.finagle
 
 import com.twitter.finagle.client.{DefaultPool, StackClient, StdStackClient, Transporter}
-import com.twitter.finagle.framer.LengthFieldFramer
+import com.twitter.finagle.decoder.LengthFieldFramer
 import com.twitter.finagle.mysql._
 import com.twitter.finagle.mysql.transport.Packet
-import com.twitter.finagle.netty4.{Netty4Transporter, Netty4HashedWheelTimer}
-import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
+import com.twitter.finagle.netty4.Netty4Transporter
+import com.twitter.finagle.param.{
+  ExceptionStatsHandler => _,
+  Monitor => _,
+  ResponseClassifier => _,
+  Tracer => _,
+  _
+}
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
 import com.twitter.finagle.stats.{ExceptionStatsHandler, NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.tracing._
@@ -20,6 +26,11 @@ import java.net.SocketAddress
  */
 trait MysqlRichClient { self: com.twitter.finagle.Client[Request, Result] =>
 
+  /**
+   * Whether the client supports unsigned integer fields
+   */
+  protected val supportUnsigned: Boolean
+
   def richClientStatsReceiver: StatsReceiver = NullStatsReceiver
 
   /**
@@ -27,15 +38,18 @@ trait MysqlRichClient { self: com.twitter.finagle.Client[Request, Result] =>
    * destination described by `dest` with the assigned
    * `label`. The `label` is used to scope client stats.
    */
-  def newRichClient(dest: Name, label: String): mysql.Client with mysql.Transactions with mysql.Cursors =
-    mysql.Client(newClient(dest, label), richClientStatsReceiver)
+  def newRichClient(
+    dest: Name,
+    label: String
+  ): mysql.Client with mysql.Transactions with mysql.Cursors =
+    mysql.Client(newClient(dest, label), richClientStatsReceiver, supportUnsigned)
 
   /**
    * Creates a new `RichClient` connected to the logical
    * destination described by `dest`.
    */
   def newRichClient(dest: String): mysql.Client with mysql.Transactions with mysql.Cursors =
-    mysql.Client(newClient(dest), richClientStatsReceiver)
+    mysql.Client(newClient(dest), richClientStatsReceiver, supportUnsigned)
 }
 
 object MySqlClientTracingFilter {
@@ -46,7 +60,10 @@ object MySqlClientTracingFilter {
       val param.Label(label) = _label
       // TODO(jeff): should be able to get this directly from ClientTracingFilter
       val annotations = new AnnotatingTracingFilter[Request, Result](
-        label, Annotation.ClientSend(), Annotation.ClientRecv())
+        label,
+        Annotation.ClientSend(),
+        Annotation.ClientRecv()
+      )
       annotations andThen TracingFilter andThen next
     }
   }
@@ -67,7 +84,6 @@ object MySqlClientTracingFilter {
   }
 }
 
-
 /**
  * @example {{{
  * val client = Mysql.client
@@ -78,7 +94,10 @@ object MySqlClientTracingFilter {
  */
 object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichClient {
 
+  protected val supportUnsigned = param.UnsignedColumns.param.default.supported
+
   object param {
+
     /**
      * A class eligible for configuring the maximum number of prepare
      * statements.  After creating `num` prepare statements, we'll start purging
@@ -95,14 +114,34 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
     object MaxConcurrentPrepareStatements {
       implicit val param = Stack.Param(MaxConcurrentPrepareStatements(20))
     }
+
+    /**
+     * Configure whether to support unsigned integer fields should be considered when
+     * returning elements of a [[Row]]. If not supported, unsigned fields will be decoded
+     * as if they were signed, potentially resulting in corruption in the case of overflowing
+     * the signed representation. Because Java doesn't support unsigned integer types
+     * widening may be necessary to support the unsigned variants. For example, an unsigned
+     * Int is represented as a Long.
+     *
+     * `Value` representations of unsigned columns which are widened when enabled:
+     * `ByteValue` -> `ShortValue``
+     * `ShortValue` -> IntValue`
+     * `LongValue` -> `LongLongValue`
+     * `LongLongValue` -> `BigIntValue`
+     */
+    case class UnsignedColumns(supported: Boolean)
+    object UnsignedColumns {
+      implicit val param = Stack.Param(UnsignedColumns(false))
+    }
   }
 
   object Client {
     private val params: Stack.Params = StackClient.defaultParams +
       ProtocolLibrary("mysql") +
-      Timer(Netty4HashedWheelTimer) +
       DefaultPool.Param(
-        low = 0, high = 1, bufferSize = 0,
+        low = 0,
+        high = 1,
+        bufferSize = 0,
         idleTime = Duration.Top,
         maxWaiters = Int.MaxValue
       )
@@ -121,12 +160,14 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
    * client which exposes a rich mysql api.
    */
   case class Client(
-      stack: Stack[ServiceFactory[Request, Result]] = Client.stack,
-      params: Stack.Params = Client.params)
-    extends StdStackClient[Request, Result, Client]
-    with WithSessionPool[Client]
-    with WithDefaultLoadBalancer[Client]
-    with MysqlRichClient {
+    stack: Stack[ServiceFactory[Request, Result]] = Client.stack,
+    params: Stack.Params = Client.params
+  ) extends StdStackClient[Request, Result, Client]
+      with WithSessionPool[Client]
+      with WithDefaultLoadBalancer[Client]
+      with MysqlRichClient {
+
+    protected val supportUnsigned = params[param.UnsignedColumns].supported
 
     protected def copy1(
       stack: Stack[ServiceFactory[Request, Result]] = this.stack,
@@ -149,12 +190,13 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
       Netty4Transporter.framedBuf(Some(framerFactory), addr, params)
     }
 
-    protected def newDispatcher(transport: Transport[Buf, Buf]):  Service[Request, Result] = {
+    protected def newDispatcher(transport: Transport[Buf, Buf]): Service[Request, Result] = {
       val param.MaxConcurrentPrepareStatements(num) = params[param.MaxConcurrentPrepareStatements]
       mysql.ClientDispatcher(
         transport.map(_.toBuf, Packet.fromBuf),
         Handshake(params),
-        num
+        num,
+        supportUnsigned
       )
     }
 
@@ -209,7 +251,8 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
     override def withResponseClassifier(responseClassifier: ResponseClassifier): Client =
       super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client = super.withRetryBackoff(backoff)
+    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+      super.withRetryBackoff(backoff)
 
     override def withStack(stack: Stack[ServiceFactory[Request, Result]]): Client =
       super.withStack(stack)

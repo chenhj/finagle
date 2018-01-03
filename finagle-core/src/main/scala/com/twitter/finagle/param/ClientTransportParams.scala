@@ -4,7 +4,11 @@ import com.twitter.finagle.Stack
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.ssl.TrustCredentials
 import com.twitter.finagle.ssl.client.{
-  SslClientConfiguration, SslClientEngineFactory, SslContextClientEngineFactory}
+  SslClientConfiguration,
+  SslClientEngineFactory,
+  SslClientSessionVerifier,
+  SslContextClientEngineFactory
+}
 import com.twitter.finagle.transport.Transport
 import com.twitter.util.Duration
 import javax.net.ssl.SSLContext
@@ -17,7 +21,7 @@ import javax.net.ssl.SSLContext
  * @see [[com.twitter.finagle.param.TransportParams]]
  */
 class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameterized[A])
-  extends TransportParams(self) {
+    extends TransportParams(self) {
 
   /**
    * Configures the TCP connection `timeout` of this client (default: 1 second).
@@ -44,6 +48,27 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
 
   /**
    * Enables SSL/TLS support (connection encrypting) on this client.
+   */
+  def tls(config: SslClientConfiguration, sessionVerifier: SslClientSessionVerifier): A =
+    self
+      .configured(Transport.ClientSsl(Some(config)))
+      .configured(SslClientSessionVerifier.Param(sessionVerifier))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this client.
+   */
+  def tls(
+    config: SslClientConfiguration,
+    engineFactory: SslClientEngineFactory,
+    sessionVerifier: SslClientSessionVerifier
+  ): A =
+    self
+      .configured(Transport.ClientSsl(Some(config)))
+      .configured(SslClientEngineFactory.Param(engineFactory))
+      .configured(SslClientSessionVerifier.Param(sessionVerifier))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this client.
    *
    * @note Given that this uses default [[SSLContext]], all configuration params (trust/key stores)
    *       should be passed as Java system properties.
@@ -58,8 +83,7 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    */
   def tls(hostname: String): A =
     self
-      .configured(Transport.ClientSsl(
-        Some(SslClientConfiguration(hostname = Some(hostname)))))
+      .configured(Transport.ClientSsl(Some(SslClientConfiguration(hostname = Some(hostname)))))
 
   /**
    * Enables SSL/TLS support (connection encrypting) with no hostname validation
@@ -70,8 +94,7 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    */
   def tls(context: SSLContext): A =
     self
-      .configured(SslClientEngineFactory.Param(
-        new SslContextClientEngineFactory(context)))
+      .configured(SslClientEngineFactory.Param(new SslContextClientEngineFactory(context)))
       .configured(Transport.ClientSsl(Some(SslClientConfiguration())))
 
   /**
@@ -80,10 +103,8 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    */
   def tls(context: SSLContext, hostname: String): A =
     self
-      .configured(SslClientEngineFactory.Param(
-        new SslContextClientEngineFactory(context)))
-      .configured(Transport.ClientSsl(
-        Some(SslClientConfiguration(hostname = Some(hostname)))))
+      .configured(SslClientEngineFactory.Param(new SslContextClientEngineFactory(context)))
+      .configured(Transport.ClientSsl(Some(SslClientConfiguration(hostname = Some(hostname)))))
 
   /**
    * Enables the TLS/SSL support (connection encrypting) with no certificate validation
@@ -94,12 +115,15 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    */
   def tlsWithoutValidation: A = {
     self
-      .configured(Transport.ClientSsl(
-        Some(SslClientConfiguration(trustCredentials = TrustCredentials.Insecure))))
+      .configured(
+        Transport
+          .ClientSsl(Some(SslClientConfiguration(trustCredentials = TrustCredentials.Insecure)))
+      )
   }
 
   /**
-   * Enables TCP tunnelling through HTTP proxy [1] on this client (default: disabled).
+   * Enables TCP tunneling via `HTTP CONNECT` through an HTTP proxy [1] on this client
+   * (default: disabled).
    *
    * TCP tunneling might be used to flow any TCP traffic (not only HTTP), but is mostly used to
    * establish an HTTPS (TLS/SSL over HTTP) connection to a remote HTTP server through a proxy.
@@ -107,15 +131,49 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    * When enabled, a Finagle client treats the server it connects to as a proxy server and asks it
    * to proxy the traffic to a given ultimate destination, specified as `host`.
    *
-   * [1]: http://www.web-cache.com/Writings/Internet-Drafts/draft-luotonen-web-proxy-tunneling-01.txt
+   * [1]: https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
+   *
+   * @param host the ultimate host a proxy server connects to
+   */
+  def httpProxyTo(host: String): A =
+    self.configured(Transporter.HttpProxyTo(Some(host -> None)))
+
+  /**
+   * Enables TCP tunneling via `HTTP CONNECT` through an HTTP proxy [1] on this client
+   * (default: disabled).
+   *
+   * TCP tunneling might be used to flow any TCP traffic (not only HTTP), but is mostly used to
+   * establish an HTTPS (TLS/SSL over HTTP) connection to a remote HTTP server through a proxy.
+   *
+   * When enabled, a Finagle client treats the server it connects to as a proxy server and asks it
+   * to proxy the traffic to a given ultimate destination, specified as `host`.
+   *
+   * [1]: https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
+   *
+   * @param host the ultimate host a proxy server connects to
+   *
+   * @param credentials credentials for a proxy server
+   */
+  def httpProxyTo(host: String, credentials: Transporter.Credentials): A =
+    self.configured(Transporter.HttpProxyTo(Some(host -> Some(credentials))))
+
+  /**
+   * Enables TCP tunneling via `HTTP CONNECT` through an HTTP proxy [1] on this client
+   * (default: disabled).
+   *
+   * TCP tunneling might be used to flow any TCP traffic (not only HTTP), but is mostly used to
+   * establish an HTTPS (TLS/SSL over HTTP) connection to a remote HTTP server through a proxy.
+   *
+   * When enabled, a Finagle client treats the server it connects to as a proxy server and asks it
+   * to proxy the traffic to a given ultimate destination, specified as `host`.
+   *
+   * [1]: https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
    *
    * @param host the ultimate host a proxy server connects to
    *
    * @param credentials optional credentials for a proxy server
-   *
-   * @note This is only enabled for finagle-netty4 right now. Applying this to a Netty 3 based
-   *       client has no effect.
    */
+  @deprecated("Use httpProxyTo(String, Tansporter.Credentials) instead", "2017-7-11")
   def httpProxyTo(
     host: String,
     credentials: Option[Transporter.Credentials]

@@ -30,8 +30,8 @@ private[redis] trait BtreeSortedSetCommands { self: BaseClient =>
    */
   def bGet(key: Buf, field: Buf): Future[Option[Buf]] =
     doRequest(BGet(key, field)) {
-      case BulkReply(message)   => Future.value(Some(message))
-      case EmptyBulkReply       => Future.None
+      case BulkReply(message) => Future.value(Some(message))
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -52,19 +52,26 @@ private[redis] trait BtreeSortedSetCommands { self: BaseClient =>
     doRequest(BCard(key)) {
       case IntegerReply(n) => Future.value(n)
     }
+
   /**
    * Gets all field value pairs for the given btree sorted order `key`
    * from `startField` to `endField`.
    */
   def bRange(
     key: Buf,
+    count: Int,
     startField: Option[Buf],
     endField: Option[Buf]
   ): Future[Seq[(Buf, Buf)]] = {
-    doRequest(BRange(key, startField, endField)) {
-      case MBulkReply(messages) => Future.value(
-        returnPairs(ReplyFormat.toBuf(messages)))
-      case EmptyMBulkReply      => Future.Nil
+    doRequest(BRange(key, Buf.Utf8(count.toString), startField, endField)) {
+      case MBulkReply(messages) => Future.value(returnPairs(ReplyFormat.toBuf(messages)))
+      case EmptyMBulkReply => Future.Nil
+    }
+  }
+
+  def bMergeEx(key: Buf, fv: Map[Buf, Buf], milliseconds: Long): Future[Unit] = {
+    doRequest(BMergeEx(key, fv, milliseconds)) {
+      case StatusReply(msg) => Future.Unit
     }
   }
 }

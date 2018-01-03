@@ -2,7 +2,7 @@ package com.twitter.finagle.memcached.protocol.text.server
 
 import com.twitter.finagle.memcached.protocol._
 import com.twitter.finagle.memcached.protocol.text.Encoder._
-import com.twitter.io.{Buf, ByteWriter}
+import com.twitter.io.{Buf, BufByteWriter, ByteWriter}
 import java.nio.charset.StandardCharsets
 
 /**
@@ -21,7 +21,7 @@ private[finagle] object ResponseToBuf {
 
   private[this] def encodeResponse(response: Seq[Buf]): Buf = {
     // + 2 to estimated size for DELIMITER.
-    val bw = ByteWriter.dynamic(10 * response.size + 2)
+    val bw = BufByteWriter.dynamic(10 * response.size + 2)
     response.foreach { token =>
       bw.writeBytes(token)
       bw.writeBytes(SPACE)
@@ -36,7 +36,7 @@ private[finagle] object ResponseToBuf {
     data: Buf,
     casUnique: Option[Buf],
     bw: ByteWriter
-  ): ByteWriter = {
+  ): bw.type = {
     response.foreach { token =>
       bw.writeBytes(token)
       bw.writeBytes(SPACE)
@@ -57,7 +57,7 @@ private[finagle] object ResponseToBuf {
 
   private[this] def encodeResponseLines(lines: Seq[Seq[Buf]]): Buf = {
     // + 5 to estimated size for END + DELIMITER.
-    val bw = ByteWriter.dynamic(100 * lines.size + 5)
+    val bw = BufByteWriter.dynamic(100 * lines.size + 5)
 
     lines.foreach { tokens =>
       tokens.foreach { token =>
@@ -91,9 +91,9 @@ private[finagle] object ResponseToBuf {
       encodeResponseLines(statLines)
     case Values(values) =>
       // + 5 to estimated size for END + DELIMITER.
-      val bw = ByteWriter.dynamic(100 * values.size + 5)
+      val bw = BufByteWriter.dynamic(100 * values.size + 5)
 
-      val tokensWithData = values map {
+      values.foreach {
         case Value(key, value, casUnique, Some(flags)) =>
           writeResponseWithData(Seq(VALUE, key, flags), value, casUnique, bw)
         case Value(key, value, casUnique, None) =>
@@ -106,19 +106,19 @@ private[finagle] object ResponseToBuf {
 }
 
 object ExceptionHandler {
-  private val ERROR         = "ERROR".getBytes
-  private val CLIENT_ERROR  = "CLIENT_ERROR".getBytes
-  private val SERVER_ERROR  = "SERVER_ERROR".getBytes
-  private val Newlines      = "[\\r\\n]".r
+  private val ERROR = "ERROR".getBytes
+  private val CLIENT_ERROR = "CLIENT_ERROR".getBytes
+  private val SERVER_ERROR = "SERVER_ERROR".getBytes
+  private val Newlines = "[\\r\\n]".r
 
   def format(e: Throwable): Seq[Array[Byte]] = e match {
     case e: NonexistentCommand =>
       Seq(ERROR)
-    case e: ClientError        =>
+    case e: ClientError =>
       Seq(CLIENT_ERROR, Newlines.replaceAllIn(e.getMessage, " ").getBytes)
-    case e: ServerError        =>
+    case e: ServerError =>
       Seq(SERVER_ERROR, Newlines.replaceAllIn(e.getMessage, " ").getBytes)
-    case t                     =>
+    case t =>
       throw t
   }
 }

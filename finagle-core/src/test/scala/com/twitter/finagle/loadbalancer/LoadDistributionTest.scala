@@ -3,7 +3,6 @@ package com.twitter.finagle.loadbalancer
 import com.twitter.conversions.time._
 import com.twitter.finagle._
 import com.twitter.finagle.service.ConstantService
-import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.finagle.util.Rng
 import com.twitter.util.{Activity, Await, Future, Time, Var}
 import org.junit.runner.RunWith
@@ -59,19 +58,20 @@ object LoadDistributionTest {
  */
 @RunWith(classOf[JUnitRunner])
 abstract class LoadDistributionTest(newBalancerFactory: Rng => LoadBalancerFactory)
-  extends FunSuite
-  with OneInstancePerTest {
+    extends FunSuite
+    with OneInstancePerTest {
 
   import LoadDistributionTest._
 
   private[this] val serverset = Var(Vector.empty[EndpointFactory[Unit, Unit]])
 
   private[this] def newClients(n: Int): Vector[ServiceFactory[Unit, Unit]] =
-    Vector.tabulate(n)(i =>
-      newBalancerFactory(Rng(i)).newBalancer(
-        Activity(serverset.map(Activity.Ok(_))),
-        NullStatsReceiver,
-        new NoBrokersAvailableException()
+    Vector.tabulate(n)(
+      i =>
+        newBalancerFactory(Rng(i)).newBalancer(
+          Activity(serverset.map(Activity.Ok(_))),
+          new NoBrokersAvailableException(),
+          Stack.Params.empty
       )
     )
 
@@ -145,22 +145,17 @@ abstract class LoadDistributionTest(newBalancerFactory: Rng => LoadBalancerFacto
   }
 }
 
-class HeapLoadDistributionTest extends LoadDistributionTest(_ =>
-  Balancers.heap(new Random(12345))
-)
+class HeapLoadDistributionTest extends LoadDistributionTest(_ => Balancers.heap(new Random(12345)))
 
-class RoundRobinLoadDistributionTest extends LoadDistributionTest(_ =>
-  Balancers.roundRobin()
-)
+class RoundRobinLoadDistributionTest extends LoadDistributionTest(_ => Balancers.roundRobin())
 
-class P2CLeastLoadedLoadDistributionTest extends LoadDistributionTest(notSoRandom =>
-  Balancers.p2c(rng = notSoRandom)
-)
+class P2CLeastLoadedLoadDistributionTest
+    extends LoadDistributionTest(notSoRandom => Balancers.p2c(rng = notSoRandom))
 
-class P2CPeakEmwaLoadDistributionTest extends LoadDistributionTest(notSoRandom =>
-  Balancers.p2cPeakEwma(rng = notSoRandom)
-)
+class P2CPeakEmwaLoadDistributionTest
+    extends LoadDistributionTest(notSoRandom => Balancers.p2cPeakEwma(rng = notSoRandom))
 
-class ApertureLoadDistributionTest extends LoadDistributionTest(notSoRandom =>
-  Balancers.aperture(rng = notSoRandom, minAperture = 5)
-)
+class ApertureLoadDistributionTest
+    extends LoadDistributionTest(
+      notSoRandom => Balancers.aperture(rng = notSoRandom, minAperture = 5)
+    )

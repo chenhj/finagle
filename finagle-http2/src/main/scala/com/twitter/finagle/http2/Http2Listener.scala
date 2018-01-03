@@ -2,7 +2,7 @@ package com.twitter.finagle.http2
 
 import com.twitter.finagle.{http, Stack, ListeningServer, Announcement}
 import com.twitter.finagle.netty4.Netty4Listener
-import com.twitter.finagle.netty4.http.exp.{HttpCodecName, initServer}
+import com.twitter.finagle.netty4.http.{Http2ChannelTransportFactory, HttpCodecName, initServer}
 import com.twitter.finagle.server.Listener
 import com.twitter.finagle.transport.Transport
 import com.twitter.util.Awaitable.CanAwait
@@ -19,25 +19,30 @@ import scala.collection.JavaConverters._
  * Please note that the listener cannot be used for TLS yet.
  */
 private[finagle] object Http2Listener {
-  def apply[In, Out](params: Stack.Params)
-    (implicit mIn: Manifest[In], mOut: Manifest[Out]): Listener[In, Out] = {
+
+  def apply[In, Out](
+    params: Stack.Params
+  )(implicit mIn: Manifest[In], mOut: Manifest[Out]): Listener[In, Out] = {
     val Transport.ServerSsl(configuration) = params[Transport.ServerSsl]
 
-    val initializer = if (configuration.isDefined) new Http2TlsServerInitializer(
-      _: ChannelInitializer[Channel],
-      params
-    ) else new Http2CleartextServerInitializer(_: ChannelInitializer[Channel], params)
+    val initializer =
+      if (configuration.isDefined)
+        new Http2TlsServerInitializer(
+          _: ChannelInitializer[Channel],
+          params
+        )
+      else new Http2CleartextServerInitializer(_: ChannelInitializer[Channel], params)
 
     new Http2Listener(params, initializer, mIn, mOut)
   }
 }
 
 private[http2] class Http2Listener[In, Out](
-    params: Stack.Params,
-    setupMarshalling: ChannelInitializer[Channel] => ChannelHandler,
-    implicit val mIn: Manifest[In],
-    implicit val mOut: Manifest[Out])
-  extends Listener[In, Out] {
+  params: Stack.Params,
+  setupMarshalling: ChannelInitializer[Channel] => ChannelHandler,
+  implicit val mIn: Manifest[In],
+  implicit val mOut: Manifest[Out]
+) extends Listener[In, Out] {
 
   private[this] val channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE)
 
@@ -60,7 +65,8 @@ private[http2] class Http2Listener[In, Out](
       initServer(params)(pipeline)
     },
     params = params,
-    setupMarshalling = setupMarshalling
+    setupMarshalling = setupMarshalling,
+    transportFactory = Http2ChannelTransportFactory
   )
 
   // we need to find the underlying handler and tell it how long to wait to drain
@@ -85,9 +91,9 @@ private[http2] class Http2Listener[In, Out](
 }
 
 private[http2] class Http2ListeningServer(
-    underlying: ListeningServer,
-    propagateDeadline: Time => Unit)
-  extends ListeningServer {
+  underlying: ListeningServer,
+  propagateDeadline: Time => Unit
+) extends ListeningServer {
 
   // we override announcement so that we delegate the announcement to the underlying listening
   // server and don't double announce.
@@ -105,7 +111,8 @@ private[http2] class Http2ListeningServer(
     this
   }
 
-  def result(timeout: Duration)(implicit permit: CanAwait): Unit = underlying.result(timeout)(permit)
+  def result(timeout: Duration)(implicit permit: CanAwait): Unit =
+    underlying.result(timeout)(permit)
 
   def boundAddress: SocketAddress = underlying.boundAddress
 }

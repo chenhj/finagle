@@ -1,6 +1,6 @@
 EXTERNAL_SOURCES = [
-  'com/twitter/finagle/memcached/integration/ExternalMemcached.scala',
-  'com/twitter/finagle/memcached/integration/InProcessMemcached.scala'
+  'com/twitter/finagle/memcached/integration/external/ExternalMemcached.scala',
+  'com/twitter/finagle/memcached/integration/external/InProcessMemcached.scala'
 ]
 
 scala_library(name='external',
@@ -15,7 +15,8 @@ scala_library(name='external',
     'finagle/finagle-memcached/src/main/scala:scala',
     'util/util-core/src/main/scala:scala',
   ],
-  sources=EXTERNAL_SOURCES
+  sources=EXTERNAL_SOURCES,
+  strict_deps=True,
 )
 
 junit_tests(

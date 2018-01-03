@@ -7,7 +7,7 @@ import com.twitter.finagle.liveness.FailureAccrualPolicy
 import com.twitter.finagle.memcached._
 import com.twitter.finagle.service.{Backoff, ResponseClassifier}
 import com.twitter.finagle.stats.NullStatsReceiver
-import com.twitter.util.{Await, Future, MockTimer, Time}
+import com.twitter.util.{Await, Awaitable, Future, MockTimer, Time}
 import org.junit.runner.RunWith
 import org.mockito.Mockito.{times, verify, when}
 import org.mockito.Matchers
@@ -19,11 +19,15 @@ import org.scalatest.mockito.MockitoSugar
 @RunWith(classOf[JUnitRunner])
 class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
+  val TimeOut = 15.seconds
+
+  private def awaitResult[T](awaitable: Awaitable[T]): T = Await.result(awaitable, TimeOut)
+
   class Helper(
-      ejectFailedHost: Boolean,
-      serviceRep: Future[Int] = Future.exception(new Exception),
-      underlyingStatus: Status = Status.Open)
-  {
+    ejectFailedHost: Boolean,
+    serviceRep: Future[Int] = Future.exception(new Exception),
+    underlyingStatus: Status = Status.Open
+  ) {
     val underlyingService = mock[Service[Int, Int]]
     when(underlyingService.close(any[Time])) thenReturn Future.Done
     when(underlyingService.status) thenReturn underlyingStatus
@@ -49,9 +53,10 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
         key = key,
         healthBroker = broker,
         ejectFailedHost = ejectFailedHost,
-        label = label)
+        label = label
+      )
 
-    val service = Await.result(factory())
+    val service = awaitResult(factory())
     verify(underlying)()
   }
 
@@ -61,17 +66,17 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
     Time.withCurrentTimeFrozen { timeControl =>
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       assert(factory.isAvailable)
       assert(service.isAvailable)
 
       // triggers markDead
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
@@ -79,7 +84,7 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
       // skips dispatch
       val failureAccrualEx = intercept[FailureAccrualException] {
-        Await.result(factory())
+        awaitResult(factory())
       }
       assert(failureAccrualEx.serviceName == label)
       verify(underlyingService, times(3))(123)
@@ -94,11 +99,11 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
       when(underlyingService(123)) thenReturn Future.value(123)
 
-      assert(Await.result(service(123)) == 123)
+      assert(awaitResult(service(123)) == 123)
 
       // failures # is reset to 0
       intercept[Exception] {
-        Await.result(service(456))
+        awaitResult(service(456))
       }
       assert(factory.isAvailable)
       assert(service.isAvailable)
@@ -113,10 +118,10 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
     Time.withCurrentTimeFrozen { timeControl =>
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
@@ -125,7 +130,7 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
       // triggers markDead by the 3rd failure
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
@@ -133,7 +138,7 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
       // skips dispatch after consecutive failures
       intercept[FailureAccrualException] {
-        Await.result(factory())
+        awaitResult(factory())
       }
       verify(underlyingService, times(3))(123)
     }
@@ -145,24 +150,24 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
     Time.withCurrentTimeFrozen { timeControl =>
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       assert(factory.isAvailable)
       assert(service.isAvailable)
 
       // triggers markDead
       intercept[Exception] {
-        Await.result(service(123))
+        awaitResult(service(123))
       }
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
 
       // ejects
       val recv = broker.recv.sync()
-      assert(Await.result(recv) == NodeMarkedDead(key))
+      assert(awaitResult(recv) == NodeMarkedDead(key))
 
       timeControl.advance(10.seconds)
       timer.tick()
@@ -172,13 +177,13 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       assert(service.isAvailable)
 
       when(underlyingService(123)) thenReturn Future.value(321)
-      Await.result(service(123))
+      awaitResult(service(123))
 
       // A good dispatch; revived
       assert(factory.isAvailable)
       assert(service.isAvailable)
       val recv2 = broker.recv.sync()
-      assert(Await.result(recv2) == NodeRevived(key))
+      assert(awaitResult(recv2) == NodeRevived(key))
     }
   }
 
@@ -189,15 +194,17 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
         Future.exception(new CancelledRequestException(new Exception)),
         Future.exception(new CancelledConnectionException(new Exception)),
         Future.exception(ChannelWriteException(new CancelledRequestException(new Exception))),
-        Future.exception(ChannelWriteException(new CancelledConnectionException(new Exception))))
+        Future.exception(ChannelWriteException(new CancelledConnectionException(new Exception)))
+      )
 
     successes.foreach { rep =>
       val h = new Helper(false, rep)
       import h._
 
       def assertReponse(rep: Future[Int]) {
-        if (Await.result(rep.liftToTry).isReturn) assert(Await.result(service(123)) == Await.result(rep))
-        else intercept[Exception](Await.result(service(123)))
+        if (awaitResult(rep.liftToTry).isReturn)
+          assert(awaitResult(service(123)) == awaitResult(rep))
+        else intercept[Exception](awaitResult(service(123)))
       }
 
       Time.withCurrentTimeFrozen { _ =>

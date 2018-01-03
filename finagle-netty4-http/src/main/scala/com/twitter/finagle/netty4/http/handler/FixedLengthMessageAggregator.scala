@@ -1,5 +1,6 @@
 package com.twitter.finagle.netty4.http.handler
 
+import com.twitter.finagle.netty4.http.FinagleHttpObjectAggregator
 import com.twitter.util.StorageUnit
 import io.netty.handler.codec.http._
 
@@ -9,8 +10,10 @@ import io.netty.handler.codec.http._
  * contents via `content` and `contentString`. Chunked transfer encoded messages
  * still require accessing `reader`.
  */
-private[http] class FixedLengthMessageAggregator(maxContentLength: StorageUnit)
-  extends HttpObjectAggregator(maxContentLength.inBytes.toInt) {
+private[http] class FixedLengthMessageAggregator(
+  maxContentLength: StorageUnit,
+  handleExpectContinue: Boolean = true
+) extends FinagleHttpObjectAggregator(maxContentLength.inBytes.toInt, handleExpectContinue) {
   require(maxContentLength.bytes >= 0)
 
   private[this] var decoding = false
@@ -30,7 +33,6 @@ private[http] class FixedLengthMessageAggregator(maxContentLength: StorageUnit)
       false
   }
 
-
   override def finishAggregation(aggregated: FullHttpMessage): Unit = {
     decoding = false
     super.finishAggregation(aggregated)
@@ -39,13 +41,14 @@ private[http] class FixedLengthMessageAggregator(maxContentLength: StorageUnit)
   private[this] def shouldAggregate(msg: HttpMessage): Boolean = {
     // We never dechunk 'Transfer-Encoding: chunked' messages
     if (HttpUtil.isTransferEncodingChunked(msg)) false
+    else if (noContentResponse(msg)) true // No body so aggregate the LastHttpContent
     else {
       // We will dechunk a message if it has a content-length header that is less
       // than or equal to the maxContentLength parameter.
       val contentLength = HttpUtil.getContentLength(msg, -1L)
 
       if (contentLength != -1L) contentLength <= maxContentLength.bytes
-      else {  // No content-length header.
+      else { // No content-length header.
 
         // Requests without a transfer-encoding or content-length header cannot have a body
         // (see https://tools.ietf.org/html/rfc7230#section-3.3.3). Netty 4 will signal
@@ -55,5 +58,21 @@ private[http] class FixedLengthMessageAggregator(maxContentLength: StorageUnit)
         msg.isInstanceOf[HttpRequest]
       }
     }
+  }
+
+  private[this] def noContentResponse(msg: HttpMessage): Boolean = msg match {
+    case res: HttpResponse =>
+      res.status.code match {
+        case 101 =>
+          // The Hixie 76 websocket handshake response may have content
+          !((res.headers.contains(HttpHeaderNames.SEC_WEBSOCKET_ACCEPT)) &&
+            (res.headers.contains(HttpHeaderNames.UPGRADE, HttpHeaderValues.WEBSOCKET, true)))
+
+        case code if code >= 100 && code < 200 => true
+        case 204 | 205 | 304 => true
+        case _ => false
+      }
+
+    case _ => false
   }
 }

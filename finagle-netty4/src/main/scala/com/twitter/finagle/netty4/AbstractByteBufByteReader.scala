@@ -4,6 +4,7 @@ import com.twitter.io.{Buf, ByteReader}
 import com.twitter.io.ByteReader.UnderflowException
 import java.lang.{Double => JDouble, Float => JFloat}
 import io.netty.buffer.ByteBuf
+import java.nio.charset.Charset
 
 /**
  * Abstract implementation of `ByteReader` that wraps the Netty 4 `ByteBuf` type.
@@ -28,6 +29,19 @@ private[netty4] abstract class AbstractByteBufByteReader(bb: ByteBuf) extends By
   final def remaining: Int = bb.readableBytes()
 
   final def remainingUntil(byte: Byte): Int = bb.bytesBefore(byte)
+
+  def process(processor: Buf.Processor): Int =
+    process(0, bb.readableBytes(), processor)
+
+  def process(from: Int, until: Int, processor: Buf.Processor): Int =
+    ByteBufAsBuf.process(from, until, processor, bb)
+
+  final def readString(numBytes: Int, charset: Charset): String = {
+    checkRemaining(numBytes)
+    val result = bb.toString(bb.readerIndex, numBytes, charset)
+    bb.readerIndex(bb.readerIndex + numBytes)
+    result
+  }
 
   final def readByte(): Byte = {
     checkRemaining(1)
@@ -171,7 +185,6 @@ private[netty4] abstract class AbstractByteBufByteReader(bb: ByteBuf) extends By
 
   final def readAll(): Buf = readBytes(remaining)
 
-
   final def close(): Unit = {
     if (!closed) {
       closed = true
@@ -182,6 +195,7 @@ private[netty4] abstract class AbstractByteBufByteReader(bb: ByteBuf) extends By
   final protected def checkRemaining(needed: Int): Unit =
     if (remaining < needed) {
       throw new UnderflowException(
-        s"tried to read $needed byte(s) when remaining bytes was $remaining")
+        s"tried to read $needed byte(s) when remaining bytes was $remaining"
+      )
     }
 }

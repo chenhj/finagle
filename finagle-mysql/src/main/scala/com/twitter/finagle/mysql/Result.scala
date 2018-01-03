@@ -33,8 +33,10 @@ object HandshakeInit extends Decoder[HandshakeInit] {
       // the rest of the fields are optional and protocol version specific
       val capLow = if (br.remaining >= 2) br.readUnsignedShortLE() else 0
 
-      require(protocol == 10 && (capLow & Capability.Protocol41) != 0,
-        "unsupported protocol version")
+      require(
+        protocol == 10 && (capLow & Capability.Protocol41) != 0,
+        "unsupported protocol version"
+      )
 
       val charset = br.readUnsignedByte().toShort
       val status = br.readShortLE().toShort
@@ -61,8 +63,7 @@ object HandshakeInit extends Decoder[HandshakeInit] {
         charset,
         status
       )
-    }
-    finally br.close()
+    } finally br.close()
   }
 }
 
@@ -93,8 +94,7 @@ object OK extends Decoder[OK] {
         br.readUnsignedShortLE(),
         new String(br.take(br.remaining))
       )
-    }
-    finally br.close()
+    } finally br.close()
   }
 }
 
@@ -120,8 +120,7 @@ object Error extends Decoder[Error] {
       val state = new String(br.take(6))
       val msg = new String(br.take(br.remaining))
       Error(code, state, msg)
-    }
-    finally br.close()
+    } finally br.close()
   }
 }
 
@@ -138,12 +137,27 @@ object EOF extends Decoder[EOF] {
     try {
       br.skip(1)
       EOF(br.readShortLE(), ServerStatus(br.readShortLE()))
-    }
-    finally br.close()
+    } finally br.close()
   }
 }
 
 case class EOF(warnings: Short, serverStatus: ServerStatus) extends Result
+
+/**
+ * These bit masks are to understand whether corresponding attribute
+ * is set for the field. Link to source code from mysql is below.
+ * [[https://github.com/mysql/mysql-server/blob/5.7/include/mysql_com.h]]
+ */
+object FieldAttributes {
+  val NotNullBitMask: Short = 1
+  val PrimaryKeyBitMask: Short = 2
+  val UniqueKeyBitMask: Short = 4
+  val MultipleKeyBitMask: Short = 8
+  val BlobBitMask: Short = 16
+  val UnsignedBitMask: Short = 32
+  val ZeroFillBitMask: Short = 64
+  val BinaryBitMask: Short = 128
+}
 
 /**
  * Represents the column meta-data associated with a query.
@@ -187,8 +201,7 @@ object Field extends Decoder[Field] {
         flags,
         decimals
       )
-    }
-    finally br.close()
+    } finally br.close()
   }
 }
 
@@ -207,6 +220,9 @@ case class Field(
 ) extends Result {
   def id: String = if (name.isEmpty) origName else name
   override val toString = "Field(%s)".format(id)
+
+  def isUnsigned: Boolean = (flags & FieldAttributes.UnsignedBitMask) > 0
+  def isSigned: Boolean = !isUnsigned
 }
 
 /**
@@ -226,8 +242,7 @@ object PrepareOK extends Decoder[PrepareOK] {
       br.skip(1)
       val warningCount = br.readUnsignedShortLE()
       PrepareOK(stmtId, numCols, numParams, warningCount)
-    }
-    finally br.close()
+    } finally br.close()
   }
 }
 
@@ -245,7 +260,7 @@ case class PrepareOK(
  * the server when sending a prepared statement
  * CloseRequest
  */
-object CloseStatementOK extends OK(0,0,0,0, "Internal Close OK")
+object CloseStatementOK extends OK(0, 0, 0, 0, "Internal Close OK")
 
 /**
  * Resultset returned from the server containing field definitions and
@@ -254,20 +269,29 @@ object CloseStatementOK extends OK(0,0,0,0, "Internal Close OK")
  * [[http://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::Resultset]]
  * [[http://dev.mysql.com/doc/internals/en/binary-protocol-resultset.html]]
  */
-object ResultSet {
-  def apply(isBinaryEncoded: Boolean)(
+private object ResultSetBuilder {
+  def apply(isBinaryEncoded: Boolean, supportUnsigned: Boolean)(
     header: Packet,
     fieldPackets: Seq[Packet],
     rowPackets: Seq[Packet]
-  ): Try[ResultSet] = Try(decode(isBinaryEncoded)(header, fieldPackets, rowPackets))
+  ): Try[ResultSet] =
+    Try(decode(isBinaryEncoded, supportUnsigned)(header, fieldPackets, rowPackets))
 
-  def decode(isBinaryEncoded: Boolean)(header: Packet, fieldPackets: Seq[Packet], rowPackets: Seq[Packet]): ResultSet = {
+  def decode(
+    isBinaryEncoded: Boolean,
+    supportUnsigned: Boolean
+  )(header: Packet, fieldPackets: Seq[Packet], rowPackets: Seq[Packet]): ResultSet = {
     val fields = fieldPackets.map(Field.decode).toIndexedSeq
 
-    decodeRows(isBinaryEncoded, rowPackets, fields)
+    decodeRows(isBinaryEncoded, supportUnsigned, rowPackets, fields)
   }
 
-  def decodeRows(isBinaryEncoded: Boolean, rowPackets: Seq[Packet], fields: IndexedSeq[Field]): ResultSet = {
+  private[this] def decodeRows(
+    isBinaryEncoded: Boolean,
+    supportUnsigned: Boolean,
+    rowPackets: Seq[Packet],
+    fields: IndexedSeq[Field]
+  ): ResultSet = {
     // A name -> index map used to allow quick lookups for rows based on name.
     val indexMap = fields.map(_.id).zipWithIndex.toMap
 
@@ -278,9 +302,9 @@ object ResultSet {
      */
     val rows = rowPackets.map { p: Packet =>
       if (!isBinaryEncoded)
-        new StringEncodedRow(p.body, fields, indexMap)
+        new StringEncodedRow(p.body, fields, indexMap, !supportUnsigned)
       else
-        new BinaryEncodedRow(p.body, fields, indexMap)
+        new BinaryEncodedRow(p.body, fields, indexMap, !supportUnsigned)
     }
 
     ResultSet(fields, rows)
@@ -310,5 +334,6 @@ object FetchResult {
 }
 
 case class FetchResult(rowPackets: Seq[Packet], containsLastRow: Boolean) extends Result {
-  override def toString: String = s"FetchResult(rows=${rowPackets.size}, containsLastRow=$containsLastRow)"
+  override def toString: String =
+    s"FetchResult(rows=${rowPackets.size}, containsLastRow=$containsLastRow)"
 }

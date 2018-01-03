@@ -5,12 +5,9 @@ import com.twitter.util.{Duration, Future}
 import scala.collection.mutable
 
 /**
- * '''Experimental:''' This API is under construction.
- *
  * @see [[MethodBuilderScaladoc]]
  */
-private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (
-    mb: MethodBuilder[Req, Rep]) {
+private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (mb: MethodBuilder[Req, Rep]) {
 
   /**
    * @see [[MethodBuilderScaladoc.withTimeoutTotal(Duration)]]
@@ -94,8 +91,9 @@ private[client] object MethodBuilderTimeout {
    * @param perRequest how long a '''single''' request is given to complete.
    */
   case class Config(
-      stackHadTotalTimeout: Boolean,
-      total: Duration = Duration.Undefined,
-      perRequest: Duration = Duration.Undefined)
+    stackHadTotalTimeout: Boolean,
+    total: Duration = Duration.Undefined,
+    perRequest: Duration = Duration.Undefined
+  )
 
 }

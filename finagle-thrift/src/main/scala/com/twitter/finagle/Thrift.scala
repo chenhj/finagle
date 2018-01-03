@@ -2,17 +2,20 @@ package com.twitter.finagle
 
 import com.twitter.finagle.client.{ClientRegistry, StackClient, StdStackClient, Transporter}
 import com.twitter.finagle.dispatch.GenSerialClientDispatcher
-import com.twitter.finagle.netty4.Netty4HashedWheelTimer
-import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
-import com.twitter.finagle.server.{Listener, ServerInfo, StackServer, StdStackServer}
+import com.twitter.finagle.param.{
+  ExceptionStatsHandler => _,
+  Monitor => _,
+  ResponseClassifier => _,
+  Tracer => _,
+  _
+}
+import com.twitter.finagle.server.{Listener, StackServer, StdStackServer}
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
 import com.twitter.finagle.stats.{ExceptionStatsHandler, StatsReceiver}
 import com.twitter.finagle.thrift.{ClientId => _, _}
 import com.twitter.finagle.thrift.service.ThriftResponseClassifier
 import com.twitter.finagle.thrift.transport.ThriftClientPreparer
-import com.twitter.finagle.thrift.transport.netty3.Netty3Transport
 import com.twitter.finagle.thrift.transport.netty4.Netty4Transport
-import com.twitter.finagle.toggle.Toggle
 import com.twitter.finagle.tracing.Tracer
 import com.twitter.finagle.transport.Transport
 import com.twitter.util.{Closable, Duration, Monitor}
@@ -90,7 +93,7 @@ import org.apache.thrift.protocol.TProtocolFactory
  * the protocol in order to ship an extra envelope carrying trace IDs
  * and client IDs associated with the request. These are used by
  * Finagle's tracing facilities and may be collected via aggregators
- * like [[http://twitter.github.com/zipkin/ Zipkin]].
+ * like [[https://github.com/openzipkin/zipkin Zipkin]].
  *
  * The negotiation is simple: on connection establishment, an
  * improbably-named method is dispatched on the server. If that
@@ -114,8 +117,8 @@ import org.apache.thrift.protocol.TProtocolFactory
  * }}}
  */
 object Thrift
-  extends Client[ThriftClientRequest, Array[Byte]]
-  with Server[Array[Byte], Array[Byte]] {
+    extends Client[ThriftClientRequest, Array[Byte]]
+    with Server[Array[Byte], Array[Byte]] {
 
   /**
    * The vanilla Thrift `Transporter` and `Listener` factories deviate from other protocols in
@@ -127,28 +130,6 @@ object Thrift
    * pipeline that would be required to ensure that the bytes were on the heap before
    * entering the Finagle transport types.
    */
-  case class ThriftImpl(
-      transporter: Stack.Params => SocketAddress => Transporter[ThriftClientRequest, Array[Byte]],
-      listener: Stack.Params => Listener[Array[Byte], Array[Byte]]) {
-
-    def mk(): (ThriftImpl, Stack.Param[ThriftImpl]) = (this, ThriftImpl.param)
-
-  }
-
-  object ThriftImpl {
-    private[this] val UseNetty4ToggleId: String = "com.twitter.finagle.thrift.UseNetty4"
-    private[this] val netty4Toggle: Toggle[Int] = Toggles(UseNetty4ToggleId)
-    private[this] def useNetty4: Boolean = netty4Toggle(ServerInfo().id.hashCode)
-
-    val Netty3: ThriftImpl = ThriftImpl(Netty3Transport.Client, Netty3Transport.Server)
-    val Netty4: ThriftImpl = ThriftImpl(Netty4Transport.Client, Netty4Transport.Server)
-
-    implicit val param: Stack.Param[ThriftImpl] = Stack.Param(
-      if (useNetty4) Netty4
-      else Netty3
-    )
-  }
-
   val protocolFactory: TProtocolFactory = Protocols.binaryFactory()
 
   // Planned deprecation. Use `Thrift.Server.maxThriftBufferSize` instead.
@@ -207,12 +188,12 @@ object Thrift
       }
 
     // We must do 'preparation' this way in order to let Finagle set up tracing & so on.
-    private val stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] = StackClient.newStack
-      .replace(StackClient.Role.prepConn, preparer)
+    private val stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] =
+      StackClient.newStack
+        .replace(StackClient.Role.prepConn, preparer)
 
     private val params: Stack.Params = StackClient.defaultParams +
       ProtocolLibrary("thrift")
-      Timer(Netty4HashedWheelTimer)
   }
 
   /**
@@ -223,12 +204,12 @@ object Thrift
    * @see [[https://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
    */
   case class Client(
-      stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] = Client.stack,
-      params: Stack.Params = Client.params)
-    extends StdStackClient[ThriftClientRequest, Array[Byte], Client]
-    with WithSessionPool[Client]
-    with WithDefaultLoadBalancer[Client]
-    with ThriftRichClient {
+    stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] = Client.stack,
+    params: Stack.Params = Client.params
+  ) extends StdStackClient[ThriftClientRequest, Array[Byte], Client]
+      with WithSessionPool[Client]
+      with WithDefaultLoadBalancer[Client]
+      with ThriftRichClient {
 
     protected def copy1(
       stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] = this.stack,
@@ -244,7 +225,7 @@ object Thrift
     override protected lazy val Stats(stats) = params[Stats]
 
     protected def newTransporter(addr: SocketAddress): Transporter[In, Out] =
-      params[ThriftImpl].transporter(params)(addr)
+      Netty4Transport.Client(params)(addr)
 
     protected def newDispatcher(
       transport: Transport[ThriftClientRequest, Array[Byte]]
@@ -320,7 +301,8 @@ object Thrift
       new ClientAdmissionControlParams(this)
 
     override def withLabel(label: String): Client = super.withLabel(label)
-    override def withStatsReceiver(statsReceiver: StatsReceiver): Client = super.withStatsReceiver(statsReceiver)
+    override def withStatsReceiver(statsReceiver: StatsReceiver): Client =
+      super.withStatsReceiver(statsReceiver)
     override def withMonitor(monitor: Monitor): Client = super.withMonitor(monitor)
     override def withTracer(tracer: Tracer): Client = super.withTracer(tracer)
     override def withExceptionStatsHandler(exceptionStatsHandler: ExceptionStatsHandler): Client =
@@ -329,12 +311,15 @@ object Thrift
     override def withResponseClassifier(responseClassifier: ResponseClassifier): Client =
       super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client = super.withRetryBackoff(backoff)
+    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+      super.withRetryBackoff(backoff)
 
     override def withStack(stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]]): Client =
       super.withStack(stack)
     override def configured[P](psp: (P, Stack.Param[P])): Client = super.configured(psp)
-    override def filtered(filter: Filter[ThriftClientRequest, Array[Byte], ThriftClientRequest, Array[Byte]]): Client =
+    override def filtered(
+      filter: Filter[ThriftClientRequest, Array[Byte], ThriftClientRequest, Array[Byte]]
+    ): Client =
       super.filtered(filter)
   }
 
@@ -375,11 +360,12 @@ object Thrift
           val preparer = ThriftServerPreparer(pf, label)
           preparer.prepare(next, params)
         }
-    }
+      }
 
     val maxThriftBufferSize: Int = 16 * 1024
 
     object param {
+
       /**
        * A `Param` to set the max size of a reusable buffer for the thrift response.
        * If the buffer size exceeds the specified value, the buffer is not reused,
@@ -398,7 +384,6 @@ object Thrift
 
     private val params: Stack.Params = StackServer.defaultParams +
       ProtocolLibrary("thrift")
-      Timer(Netty4HashedWheelTimer)
   }
 
   /**
@@ -410,7 +395,8 @@ object Thrift
   case class Server(
     stack: Stack[ServiceFactory[Array[Byte], Array[Byte]]] = Server.stack,
     params: Stack.Params = Server.params
-  ) extends StdStackServer[Array[Byte], Array[Byte], Server] with ThriftRichServer {
+  ) extends StdStackServer[Array[Byte], Array[Byte], Server]
+      with ThriftRichServer {
     protected def copy1(
       stack: Stack[ServiceFactory[Array[Byte], Array[Byte]]] = this.stack,
       params: Stack.Params = this.params
@@ -424,7 +410,7 @@ object Thrift
     override val Server.param.MaxReusableBufferSize(maxThriftBufferSize) =
       params[Server.param.MaxReusableBufferSize]
 
-    protected def newListener(): Listener[In, Out] = params[ThriftImpl].listener(params)
+    protected def newListener(): Listener[In, Out] = Netty4Transport.Server(params)
 
     protected def newDispatcher(
       transport: Transport[In, Out],
@@ -477,4 +463,3 @@ object Thrift
     service: ServiceFactory[Array[Byte], Array[Byte]]
   ): ListeningServer = server.serve(addr, service)
 }
-

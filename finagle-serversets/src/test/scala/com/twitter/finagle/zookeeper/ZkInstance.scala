@@ -5,8 +5,7 @@ import com.twitter.io.TempDirectory.create
 import com.twitter.finagle.common.zookeeper.ZooKeeperClient
 import com.twitter.zk.ServerCnxnFactory
 import java.net.{InetAddress, InetSocketAddress}
-import org.apache.zookeeper.server.persistence.FileTxnSnapLog
-import org.apache.zookeeper.server.{ZKDatabase, ZooKeeperServer}
+import org.apache.zookeeper.server.ZooKeeperServer
 
 class ZkInstance {
   var connectionFactory: ServerCnxnFactory = null
@@ -25,12 +24,7 @@ class ZkInstance {
   def start() {
     started = true
 
-    val txn = new FileTxnSnapLog(create(), create())
-    val zkdb = new ZKDatabase(txn)
-    zookeeperServer = new ZooKeeperServer(
-      create(),
-      create(),
-      ZooKeeperServer.DEFAULT_TICK_TIME)
+    zookeeperServer = new ZooKeeperServer(create(), create(), ZooKeeperServer.DEFAULT_TICK_TIME)
     zookeeperServer.setMaxSessionTimeout(100)
     zookeeperServer.setMinSessionTimeout(100)
     connectionFactory = ServerCnxnFactory(InetAddress.getLoopbackAddress)

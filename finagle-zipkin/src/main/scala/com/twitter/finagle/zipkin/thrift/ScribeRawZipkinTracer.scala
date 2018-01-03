@@ -5,7 +5,12 @@ import com.twitter.conversions.storage._
 import com.twitter.conversions.time._
 import com.twitter.finagle.{Service, SimpleFilter, Thrift}
 import com.twitter.finagle.builder.ClientBuilder
-import com.twitter.finagle.stats.{ClientStatsReceiver, NullStatsReceiver, StatsReceiver}
+import com.twitter.finagle.stats.{
+  BlacklistStatsReceiver,
+  ClientStatsReceiver,
+  NullStatsReceiver,
+  StatsReceiver
+}
 import com.twitter.finagle.thrift.Protocols
 import com.twitter.finagle.tracing._
 import com.twitter.finagle.util.DefaultTimer
@@ -23,27 +28,40 @@ import scala.util.control.NonFatal
 object ScribeRawZipkinTracer {
   val tracerCache = new TracerCache[ScribeRawZipkinTracer]
 
+  /**
+   * Only report `requests`, `success`, and `failures` (including underlying counters for
+   * individual exceptions).
+   */
+  private val statsReceiver: StatsReceiver = new BlacklistStatsReceiver(
+    ClientStatsReceiver, {
+      case Seq(_, "requests") => false
+      case Seq(_, "success") => false
+      case Seq(_, "failures", _*) => false
+      case _ => true
+    }
+  )
+
   private[this] def newClient(
     scribeHost: String,
     scribePort: Int,
     name: String
   ): Scribe.FutureIface = {
     val transport = ClientBuilder()
-      .stack(Thrift.client
+      .stack(
+        Thrift.client
         // using an arbitrary, but bounded number of waiters to avoid memory leaks
-        .withSessionPool.maxWaiters(250))
+        .withSessionPool.maxWaiters(250)
+      )
       .name(name)
       .hosts(new InetSocketAddress(scribeHost, scribePort))
-      .reportTo(ClientStatsReceiver)
+      .reportTo(statsReceiver)
       .hostConnectionLimit(5)
       // somewhat arbitrary, but bounded timeouts
       .timeout(1.second)
       .daemon(true)
       .build()
 
-    new Scribe.FinagledClient(
-      new TracelessFilter andThen transport,
-      Protocols.binaryFactory())
+    new Scribe.FinagledClient(new TracelessFilter andThen transport, Protocols.binaryFactory())
   }
 
   /**
@@ -64,7 +82,8 @@ object ScribeRawZipkinTracer {
     timer: Timer,
     clientName: String
   ): ScribeRawZipkinTracer =
-    tracerCache.getOrElseUpdate(scribeHost + scribePort + scribeCategory,
+    tracerCache.getOrElseUpdate(
+      scribeHost + scribePort + scribeCategory,
       apply(
         newClient(scribeHost, scribePort, clientName),
         scribeCategory,
@@ -141,17 +160,17 @@ object ScribeRawZipkinTracer {
 }
 
 /**
-  * Receives traces and sends them off to scribe with the specified scribeCategory.
-  *
-  * @param client The scribe client used to send traces to scribe
-  * @param statsReceiver We generate stats to keep track of traces sent, failures and so on
-  * @param scribeCategory scribe category under which the trace will be logged
-  * @param timer A Timer used for timing out spans in the [[DeadlineSpanMap]]
-  * @param poolSize The number of Memory transports to make available for serializing Spans
-  * @param initialBufferSize Initial size of each transport
-  * @param maxBufferSize Max size to keep around. Transports will grow as needed, but will revert back to `initialBufferSize` when reset if
-  * they grow beyond `maxBufferSize`
-  */
+ * Receives traces and sends them off to scribe with the specified scribeCategory.
+ *
+ * @param client The scribe client used to send traces to scribe
+ * @param statsReceiver We generate stats to keep track of traces sent, failures and so on
+ * @param scribeCategory scribe category under which the trace will be logged
+ * @param timer A Timer used for timing out spans in the [[DeadlineSpanMap]]
+ * @param poolSize The number of Memory transports to make available for serializing Spans
+ * @param initialBufferSize Initial size of each transport
+ * @param maxBufferSize Max size to keep around. Transports will grow as needed, but will revert back to `initialBufferSize` when reset if
+ * they grow beyond `maxBufferSize`
+ */
 private[thrift] class ScribeRawZipkinTracer(
   client: Scribe.FutureIface,
   statsReceiver: StatsReceiver,
@@ -170,10 +189,10 @@ private[thrift] class ScribeRawZipkinTracer(
   private[this] val maxSizeInBytes = maxBufferSize.inBytes.toInt
 
   /**
-    * A wrapper around the TReusableMemoryTransport from Scrooge that
-    * also resets the size of the underlying buffer if it grows larger
-    * than `maxBufferSize`
-    */
+   * A wrapper around the TReusableMemoryTransport from Scrooge that
+   * also resets the size of the underlying buffer if it grows larger
+   * than `maxBufferSize`
+   */
   private[this] val encoder = BaseEncoding.base64()
   private class ReusableTransport {
     private[this] val baos = new TByteArrayOutputStream(initialSizeInBytes) {
@@ -212,11 +231,13 @@ private[thrift] class ScribeRawZipkinTracer(
   }
 
   private[this] val bufferPool = new ArrayBlockingQueue[ReusableTransport](poolSize)
-  (0 until poolSize) foreach { _ => bufferPool.add(new ReusableTransport) }
+  (0 until poolSize) foreach { _ =>
+    bufferPool.add(new ReusableTransport)
+  }
 
   /**
-    * Serialize the span, base64 encode and shove it all in a list.
-    */
+   * Serialize the span, base64 encode and shove it all in a list.
+   */
   private[this] def createLogEntries(spans: Seq[Span]): Seq[LogEntry] = {
     val entries = new ArrayBuffer[LogEntry](spans.size)
 
@@ -237,23 +258,26 @@ private[thrift] class ScribeRawZipkinTracer(
   }
 
   /**
-    * Log the span data via Scribe.
-    */
+   * Log the span data via Scribe.
+   */
   def sendSpans(spans: Seq[Span]): Future[Unit] = {
-    client.log(createLogEntries(spans)).respond {
-      case Return(ResultCode.Ok) => okCounter.incr()
-      case Return(ResultCode.TryLater) => tryLaterCounter.incr()
-      case Return(_) => Unit
-      case Throw(e) => errorReceiver.counter(e.getClass.getName).incr()
-    }.unit
+    client
+      .log(createLogEntries(spans))
+      .respond {
+        case Return(ResultCode.Ok) => okCounter.incr()
+        case Return(ResultCode.TryLater) => tryLaterCounter.incr()
+        case Return(_) => Unit
+        case Throw(e) => errorReceiver.counter(e.getClass.getName).incr()
+      }
+      .unit
   }
 }
 
 /**
-  * Makes sure we don't trace the Scribe logging.
-  */
+ * Makes sure we don't trace the Scribe logging.
+ */
 private class TracelessFilter[Req, Rep] extends SimpleFilter[Req, Rep] {
-  def apply(request: Req, service: Service[Req, Rep]): Future[Rep]  = {
+  def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
     Trace.letClear {
       service(request)
     }

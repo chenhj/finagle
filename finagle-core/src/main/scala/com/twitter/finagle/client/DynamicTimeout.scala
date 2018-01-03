@@ -11,7 +11,7 @@ import com.twitter.util.Duration
  * @see [[TimeoutFilter]]
  * @see [[LatencyCompensation]]
  */
-private[finagle] object DynamicTimeout {
+object DynamicTimeout {
 
   private[this] val PerRequestKey = new Contexts.local.Key[Duration]()
   private[this] val TotalKey = new Contexts.local.Key[Duration]()
@@ -92,8 +92,8 @@ private[finagle] object DynamicTimeout {
       TimeoutFilter.Param,
       param.Timer,
       LatencyCompensation.Compensation,
-      ServiceFactory[Req, Rep]]
-    {
+      ServiceFactory[Req, Rep]
+    ] {
       val role: Stack.Role = TimeoutFilter.role
       val description: String =
         "Apply a dynamic timeout-derived deadline to request"
@@ -107,7 +107,8 @@ private[finagle] object DynamicTimeout {
         val filter = new TimeoutFilter[Req, Rep](
           timeoutFn(PerRequestKey, defaultTimeout.timeout, compensation.howlong),
           duration => new IndividualRequestTimeoutException(duration),
-          timer.timer)
+          timer.timer
+        )
         filter.andThen(next)
       }
     }
@@ -134,11 +135,10 @@ private[finagle] object DynamicTimeout {
     val compensation = params[LatencyCompensation.Compensation].howlong
     val timer = params[param.Timer].timer
     val timeoutFunc = timeoutFn(TotalKey, defaultTimeout, compensation)
-    val exceptionFn = { d: Duration => new GlobalRequestTimeoutException(d) }
-    TimeoutFilter.typeAgnostic(
-      timeoutFunc,
-      exceptionFn,
-      timer)
+    val exceptionFn = { d: Duration =>
+      new GlobalRequestTimeoutException(d)
+    }
+    TimeoutFilter.typeAgnostic(timeoutFunc, exceptionFn, timer)
   }
 
 }
